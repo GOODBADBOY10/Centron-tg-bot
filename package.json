@@ -17,9 +17,14 @@
     "typescript": "^5.8.3"
   },
   "dependencies": {
-    "@mysten/sui": "^1.26.1",
+    "@cetusprotocol/cetus-sui-clmm-sdk": "^5.3.4",
+    "@mysten/bcs": "^1.6.1",
+    "@mysten/sui": "^1.28.2",
     "@mysten/sui.js": "^0.54.1",
+    "@polymedia/suitcase-core": "^0.0.54",
     "axios": "^1.8.4",
+    "bip39": "^3.1.0",
+    "crypto-js": "^4.2.0",
     "dotenv": "^16.4.7",
     "express": "^5.1.0",
     "firebase-admin": "^13.2.0",

@@ -25,12 +25,11 @@ app.get("/", async (req, res) => {
     // res.send("Hello Get");
 });
 
-
 app.listen(PORT, async function (err) {
     if (err) console.log(err);
     console.log("Server is running on PORT", PORT);
     // Set webhook URL once here (customize for production)
-    const webhookUrl = 'https://dc05-105-119-11-16.ngrok-free.app/';
+    const webhookUrl = 'https://efa9-102-89-83-156.ngrok-free.app/';
 
     if (bot && bot.telegram) {
         await bot.telegram.setWebhook(webhookUrl);
