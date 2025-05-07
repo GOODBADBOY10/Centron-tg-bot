@@ -4,7 +4,7 @@ import { getBalance } from "./getBalance.js";
 export async function handleWallets(ctx, userId) {
     const user = await fetchUser(userId);
     const userWallets = user?.wallets || [];
-    console.log(userWallets);
+    // console.log(userWallets);
 
     if (userWallets.length === 0) {
         return ctx.reply("😕 No wallets found. Use the buttons below to add or connect one.", {
@@ -49,16 +49,3 @@ export async function handleWallets(ctx, userId) {
         }
     }
 }
-
-
-
-// try {
-            // keypair = Ed25519Keypair.fromSecretKey(
-            //     new Uint8Array(Buffer.from(privateKey, 'hex'))
-            // );
-        //     keypair = Ed25519Keypair.fromSecretKey(privateKeyBytes);
-        //     console.log("Keypair created successfully:", keypair);
-        // } catch (error) {
-        //     console.error("Failed to create keypair:", error);
-        //     throw new Error("Invalid private key format");
-        // }

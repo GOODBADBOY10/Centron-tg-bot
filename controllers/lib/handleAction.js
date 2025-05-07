@@ -1,4 +1,6 @@
 import { handleBuySlippage } from "./buySlippage.js";
+import { getSeedPhrase } from "./db.js";
+import { getPrivateKey } from "./db.js";
 import { fetchUser, saveUser, addWalletToUser } from "./db.js";
 import { generateNewWallet } from "./genNewWallet.js";
 import { getBalance } from "./getBalance.js";
@@ -319,10 +321,16 @@ export async function handleAction(ctx, action) {
             const user = await fetchUser(userId);
             const selectedWallet = user.wallets[index];
 
+            userSteps[userId].walletPrivateKey = selectedWallet.walletPrivateKey;
+            userSteps[userId].walletAddress = selectedWallet.walletAddress;
+
             await ctx.answerCbQuery("✅ Wallet selected");
             await ctx.editMessageReplyMarkup(createWithdrawWalletKeyboard(userId)); // Optional, for updated UI
             return ctx.reply(`🔗 Enter the address you want to send SUI to from:\n<code>${selectedWallet.walletAddress}</code>`, {
-                parse_mode: "HTML",
+                parse_mode: "Markdown",
+                reply_markup: {
+                    force_reply: true
+                }
             });
         }
 
@@ -337,44 +345,90 @@ export async function handleAction(ctx, action) {
             userSteps[userId].withdrawAddress = address;
             userSteps[userId].state = "awaiting_withdraw_amount";
 
-            return ctx.reply("💸 How much SUI would you like to withdraw?");
+            return ctx.reply("💸 How much SUI would you like to withdraw?", {
+                parse_mode: "Markdown",
+                reply_markup: {
+                    force_reply: true
+                }
+            });
         }
 
         case userSteps[userId]?.state === "awaiting_withdraw_amount": {
             const amount = parseFloat(ctx.message.text.trim());
             const userId = ctx.from.id.toString();
-            console.log(userId);
+            // console.log(userId);
 
             if (isNaN(amount) || amount <= 0) {
                 return ctx.reply("❌ Invalid amount. Please enter a valid number.");
             }
 
-            const user = await fetchUser(userId);
+            userSteps[userId].withdrawAmount = amount;
+
+            // const user = await fetchUser(userId);
+            // console.log("🧪 Wallets fetched for user:", JSON.stringify(user.wallets));
             // console.log(user.wallets)
-            const walletIndex = userSteps[userId].selectedWalletIndex;
-            const senderWallet = user.wallets[walletIndex];
-            console.log(senderWallet);
-            const toAddress = userSteps[userId].withdrawAddress;
+            // const walletIndex = userSteps[userId].selectedWalletIndex;
+            // const walletAddress = user?.walletAddress
+            // console.log(walletAddress);
+            // const senderWallet = user.wallets[walletIndex];
+            // const base64PrivateKey = await getPrivateKey(userId, walletAddress);
+            // const seed_phrase = await getSeedPhrase(userId, walletAddress);
+            // console.log(base64PrivateKey);
+            // const toAddress = userSteps[userId].withdrawAddress;
+            // console.log("the toaddress is", toAddress);
+
+            const { withdrawAddress, selectedWalletIndex } = userSteps[userId];
+
+            const user = await fetchUser(userId);
+            console.log("User data available:", !!user);
+            console.log("User wallets available:", user && !!user.wallets);
+            console.log("Selected wallet index:", selectedWalletIndex);
+
+            if (!user || !user.wallets || !user.wallets[selectedWalletIndex]) {
+                console.error("Cannot find selected wallet for user");
+                return ctx.reply("❌ Error: Cannot find your selected wallet. Please try again.");
+            }
+
+            const selectedWallet = user.wallets[selectedWalletIndex];
+            console.log("Selected wallet:", {
+                hasAddress: !!selectedWallet.walletAddress,
+                hasPrivateKey: !!selectedWallet.walletPrivateKey,
+                privateKeyType: selectedWallet.walletPrivateKey ? typeof selectedWallet.walletPrivateKey : "N/A"
+            });
+
+            // Get the wallet's private key - USE THE CORRECT PROPERTY NAME
+            // It might be 'privateKey' instead of 'walletPrivateKey'
+            const walletPrivateKey = selectedWallet.walletPrivateKey || selectedWallet.privateKey;
+
+            if (!walletPrivateKey) {
+                console.error("No private key found in the wallet");
+                return ctx.reply("❌ Error: Could not find private key for the selected wallet.");
+            }
+
+            console.log(`Processing withdrawal: ${amount} SUI to ${withdrawAddress}`);
+
+            // Send a processing message
+            await ctx.reply("⏳ Processing your withdrawal request...");
 
             // Send the SUI transaction (replace with your own method)
             try {
-                console.log("Sender wallet:", senderWallet);
-
-                if (!senderWallet || !senderWallet.privateKey) {
-                    console.error("Missing or invalid sender wallet:", senderWallet);
-                    return ctx.reply("❌ Could not find wallet private key for withdrawal.");
-                }
-                const tx = await sendSui({
-                    senderPrivateKey: senderWallet.privateKey,
-                    to: toAddress,
+                // if (!base64PrivateKey) {
+                // console.error("Missing or invalid sender wallet:", base64PrivateKey);
+                // return ctx.reply("❌ Could not find wallet private key for withdrawal.");
+                // }
+                const tx = await sendSui(
+                    walletPrivateKey,
+                    withdrawAddress,
                     amount,
+                );
+                return ctx.reply(`✅ Successfully sent ${amount} SUI to:\n<code>${withdrawAddress}</code>\n\nTransaction: <code>Tx Hash${tx.digest}</code>`, {
+                    parse_mode: "HTML"
                 });
-
-                userSteps[userId] = null; // clear session
-                return ctx.reply(`✅ Withdrawal sent!\n\n🔗 Tx Hash: ${tx.digest}`);
             } catch (err) {
                 console.error(err);
                 return ctx.reply("❌ Failed to send withdrawal.");
+            } finally {
+                delete userSteps[userId];
             }
         }
 

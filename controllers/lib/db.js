@@ -1,7 +1,6 @@
 import admin from "firebase-admin";
 import axios from 'axios';
 import { Telegraf } from "telegraf";
-import { Ed25519Keypair } from "@mysten/sui/keypairs/ed25519";
 import fs from 'fs'
 
 // const file = await readFile('./serviceAccountKey.json', 'utf-8');
@@ -14,7 +13,7 @@ admin.initializeApp({
 });
 
 const db = admin.firestore();
-const bot = new Telegraf('7280147356:AAH9c1N2lDKouexctsDd7x1fmATylHb-Lis');
+// const bot = new Telegraf('7280147356:AAEiEsTxsJU0M2qvOyiXJEGz1lhP-K67iMA');
 const originalBatch = db.batch;
 
 db.batch = function () {
@@ -57,13 +56,13 @@ export async function getUser(userId) {
 
 export async function addWalletToUser(userId, wallet) {
     const db = admin.firestore();
-    userId = String(userId); 
+    userId = String(userId);
     if (!userId || typeof userId !== "string" || userId.trim() === "") {
         console.error("❌ Invalid userId:", userId);
         throw new Error("Invalid userId: must be a non-empty string");
     }
-    console.log("Saving wallet for userId:", userId);
-    console.log("Wallet:", wallet);
+    // console.log("Saving wallet for userId:", userId);
+    // console.log("Wallet:", wallet);
 
     const cleanWallet = {};
     for (const key in wallet) {
@@ -72,14 +71,26 @@ export async function addWalletToUser(userId, wallet) {
         }
     }
 
+    // ✅ Convert privateKey to Base64 string if it's not already
+    if (cleanWallet.privateKey) {
+        if (cleanWallet.privateKey instanceof Uint8Array || Buffer.isBuffer(cleanWallet.privateKey)) {
+            cleanWallet.privateKey = Buffer.from(cleanWallet.privateKey).toString("hex");
+        } else if (typeof cleanWallet.privateKey === "object") {
+            // Convert object to string representation (if it's JSON serializable)
+            cleanWallet.privateKey = JSON.stringify(cleanWallet.privateKey);
+        } else if (typeof cleanWallet.privateKey !== "string") {
+            throw new Error("❌ privateKey must be a string, Buffer, or Uint8Array");
+        }
+    }
+
     try {
         const dataToSave = {
             wallets: admin.firestore.FieldValue.arrayUnion(cleanWallet),
-          };
-          
-          if (cleanWallet.walletAddress !== undefined) {
+        };
+
+        if (cleanWallet.walletAddress !== undefined) {
             dataToSave.walletAddress = cleanWallet.walletAddress;
-          }
+        }
         await db.collection("users").doc(userId).set({
             ...dataToSave
             // walletAddress: cleanWallet.walletAddress,
@@ -91,6 +102,68 @@ export async function addWalletToUser(userId, wallet) {
         console.error("❌ Error saving wallet to Firestore:", error.message || error);
     }
 }
+
+//getting the private key
+/**
+ * Get the Base64-encoded private key for a user's wallet (Firebase Admin).
+ * @param {string} telegramUserId - Telegram user ID. userId
+ * @param {string} walletAddress - Wallet address to fetch the key for.
+ * @returns {Promise<string>} - Base64-encoded private key.
+ */
+export async function getPrivateKey(userId, walletAddress) {
+    if (!userId || !walletAddress) {
+        throw new Error(`Invalid input: userId=${userId}, walletAddress=${walletAddress}`);
+    }
+
+    const userRef = admin.firestore().collection('users').doc(userId.toString());
+    const userSnap = await userRef.get();
+
+    if (!userSnap.exists) {
+        throw new Error(`User ${userId} not found.`);
+    }
+
+    const userData = userSnap.data();
+
+    const wallet = (userData.wallets || []).find(w => w.walletAddress === walletAddress);
+
+    if (!wallet) {
+        throw new Error(`Wallet ${walletAddress} not found for user ${telegramUserId}.`);
+    }
+
+    if (!wallet.privateKey) {
+        throw new Error(`Private key missing for wallet ${walletAddress}.`);
+    }
+
+    return wallet.privateKey;
+}
+
+export async function getSeedPhrase(userId, walletAddress) {
+    if (!userId || !walletAddress) {
+        throw new Error(`Invalid input: userId=${userId}, walletAddress=${walletAddress}`);
+    }
+
+    const userRef = admin.firestore().collection('users').doc(userId.toString());
+    const userSnap = await userRef.get();
+
+    if (!userSnap.exists) {
+        throw new Error(`User ${userId} not found.`);
+    }
+
+    const userData = userSnap.data();
+
+    const wallet = (userData.wallets || []).find(w => w.seedPhrase === walletAddress);
+
+    if (!wallet) {
+        throw new Error(`Wallet ${walletAddress} not found for user ${userId}.`);
+    }
+
+    if (!wallet.seedPhrase) {
+        throw new Error(`Private key missing for wallet ${walletAddress}.`);
+    }
+
+    return wallet.seedPhrase;
+}
+
 
 export async function setBuySlippage(userId, slippage) {
     return db.collection("users").doc(userId).set({
@@ -116,8 +189,6 @@ export async function updateBuySlippage(userId, walletAddress, slippage) {
 
     await userRef.update({ wallets: updatedWallets });
 }
-
-
 
 export async function deleteUser(userId) {
     await db.collection("users").doc(userId.toString()).delete();

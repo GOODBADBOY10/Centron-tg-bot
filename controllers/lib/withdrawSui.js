@@ -1,10 +1,15 @@
 import { Ed25519Keypair } from '@mysten/sui.js/keypairs/ed25519';
 import { SuiClient } from '@mysten/sui.js/client';
 import { TransactionBlock } from '@mysten/sui.js/transactions';
+// import { Transaction } from '@mysten/sui/transactions';
 import { getFullnodeUrl } from '@mysten/sui.js/client';
-import { fromBase64, fromHex } from '@mysten/bcs';
-import { mnemonicToSeedSync } from'@scure/bip39';
-import { HDKey } from '@scure/bip32';
+import { mnemonicToSeedSync } from 'bip39';
+import { fromHex } from '@mysten/sui/utils';
+import { fromBase64 } from '@mysten/bcs';
+// import { mnemonicToSeedSync } from'@scure/bip39';
+// import { HDKey } from '@scure/bip32';
+import { decodeSuiPrivateKey } from '@mysten/sui.js/cryptography';
+import bs58 from 'bs58'
 
 // import { bcs, fromHex, toHex } from '@mysten/bcs';
 // import { fromB64 } from '@mysten/sui.js/utils';
@@ -12,147 +17,120 @@ import { shorten } from "../../utils/shorten.js";
 import { fetchUser } from "./db.js";
 import { userSteps } from "./userState.js";
 
-export async function sendSui(privateKeyOrOptions, toAddressParam, amountParam) {
+
+
+
+export async function sendSui(walletPrivateKey, toAddressParam, amountParam) {
     try {
-        let privateKey, toAddress, amount;
-        if (typeof privateKeyOrOptions === 'object' && privateKeyOrOptions !== null) {
-            console.log("Using options object format");
-            // Extract values from the options object
-            privateKey = privateKeyOrOptions.senderPrivateKey;
-            toAddress = privateKeyOrOptions.to;
-            amount = privateKeyOrOptions.amount;
-        } else {
-            // Using the traditional parameter approach
-            privateKey = privateKeyOrOptions;
-            toAddress = toAddressParam;
-            amount = amountParam;
+        console.log("SendSui function called with:", {
+            hasPrivateKey: !!walletPrivateKey,
+            toAddress: toAddressParam,
+            amount: amountParam
+        });
+
+         // Validate inputs early
+         if (!walletPrivateKey) {
+            throw new Error("Missing wallet private key");
         }
-        // Debug logging
-        console.log("Input privateKey type:", typeof privateKey);
-        console.log("Input privateKey length:", privateKey ? privateKey.length : 0);
-        if (!toAddress) {
-            throw new Error("Recipient address is required");
+        
+        if (!toAddressParam) {
+            throw new Error("Missing recipient address");
         }
-        if (amount === undefined || amount === null) {
-            throw new Error("Amount is required");
-        }
-        // Ensure privateKey is provided and is a string
-        if (!privateKey) {
-            throw new Error("Private key is required");
+        
+        if (!amountParam || typeof amountParam !== 'number' || amountParam <= 0) {
+            throw new Error(`Invalid amount: ${amountParam}`);
         }
 
-        if (typeof privateKey !== 'string') {
-            throw new Error("Private key must be a string");
-        }
+        // let privateKey = walletPrivateKey;
+        let privateKey = '0x456f178712fe771207b107ba499b42d45e997ec96b81db62f7134c0f619a7e45';
+        const toAddress = toAddressParam;
+        const amount = amountParam;
+        // let privateKey, toAddress, amount;
+        // Using the traditional parameter approach
+        // privateKey = walletPrivateKey;
+        // privateKey = '0xd1e441c79f431ba29c0591f4d97d993bfe0b80ff3e6721404ffd65eed86196d4';
+        // toAddress = toAddressParam;
+        // amount = parseFloat(amountParam);
+        // amount = 3;
 
-        // Remove any whitespace
-        const trimmedPrivateKey = privateKey.trim();
+        if (typeof privateKey === 'object') {
+            if (privateKey?.type === 'Buffer' && Array.isArray(privateKey?.data)) {
+                privateKey = Buffer.from(privateKey.data).toString('hex');
+            } else if (typeof privateKey.walletPrivateKey === 'string') {
+                // If privateKey is nested inside an object
+                privateKey = privateKey.walletPrivateKey;
+            } else {
+                console.log("⚠️ Unrecognized privateKey object:", privateKey);
+                throw new Error("Could not extract privateKey from object");
+            }
+        } else if (typeof privateKey !== 'string') {
+            throw new Error(`Private key must be a string or Buffer object, got: ${typeof privateKey}`);
+        }
+        // } else {
+        // privateKey = JSON.stringify(privateKey);
+        // console.log(privateKey);
+        // throw new Error("Could not extract privateKey from object");
+        // }
 
         let keypair;
-
-        // Case 1: Try to handle as a standard hex key (with or without 0x prefix)
-        if (/^(0x)?[0-9a-fA-F]+$/.test(trimmedPrivateKey)) {
-            const cleanPrivateKey = trimmedPrivateKey.startsWith('0x')
-                ? trimmedPrivateKey.slice(2)
-                : trimmedPrivateKey;
-
-            if (cleanPrivateKey.length === 64) {
-                // Standard hex private key format
-                try {
-                    const privateKeyBytes = Buffer.from(cleanPrivateKey, 'hex');
-                    keypair = Ed25519Keypair.fromSecretKey(privateKeyBytes);
-                    console.log("Created keypair from hex private key");
-                } catch (error) {
-                    console.error("Failed to create keypair from hex:", error);
-                }
-            } else {
-                console.log(`Hex key with incorrect length: ${cleanPrivateKey.length}, expected 64`);
-            }
-        }
-
-        // Case 2: Try to handle as Base64 encoded key
-        if (!keypair && /^[A-Za-z0-9+/=]+$/.test(trimmedPrivateKey)) {
-            try {
-                // Decode base64 to bytes
-                const privateKeyBytes = Buffer.from(trimmedPrivateKey, 'base64');
-
-                // If the decoded bytes are 32 in length, it's likely a valid Ed25519 private key
-                if (privateKeyBytes.length === 32) {
-                    keypair = Ed25519Keypair.fromSecretKey(privateKeyBytes);
-                    console.log("Created keypair from base64 private key");
-                } else {
-                    console.log(`Base64 decoded to incorrect length: ${privateKeyBytes.length}, expected 32`);
-                }
-            } catch (error) {
-                console.error("Failed to create keypair from base64:", error);
-            }
-        }
-
-        // Case 3: Try to handle as a JSON string containing a key
-        if (!keypair && (trimmedPrivateKey.startsWith('{') || trimmedPrivateKey.startsWith('['))) {
-            try {
-                const keyObject = JSON.parse(trimmedPrivateKey);
-
-                // Check common JSON key formats
-                if (keyObject.privateKey) {
-                    // Try recursive call with the extracted key
-                    return sendSui(keyObject.privateKeyOrOptions, toAddress, amountParam);
-                } else if (Array.isArray(keyObject) && keyObject.length === 32) {
-                    // Handle case where it's a JSON array of bytes
-                    keypair = Ed25519Keypair.fromSecretKey(new Uint8Array(keyObject));
-                    console.log("Created keypair from JSON byte array");
-                }
-            } catch (error) {
-                console.error("Failed to parse as JSON:", error);
-            }
-        }
-
-        // Case 4: Try as a mnemonic phrase (if it contains spaces and looks like words)
-        if (!keypair && /^[a-z ]+$/.test(trimmedPrivateKey) && trimmedPrivateKey.includes(' ')) {
-            try {
-                // This requires the @scure/bip39 and @scure/bip32 packages
-                const seed = mnemonicToSeedSync(trimmedPrivateKey);
-                const hdKey = HDKey.fromMasterSeed(seed);
-
-                // Derive the key using Sui's derivation path (m/44'/784'/0'/0'/0')
-                const suiPath = "m/44'/784'/0'/0'/0'";
-                const childKey = hdKey.derive(suiPath);
-
-                if (childKey.privateKey) {
-                    keypair = Ed25519Keypair.fromSecretKey(childKey.privateKey);
-                    console.log("Created keypair from mnemonic phrase");
-                }
-            } catch (error) {
-                console.error("Failed to create keypair from mnemonic:", error);
-            }
-        }
-
-        // If we couldn't create a keypair with any method, throw an error
+        // const secretKey = Buffer.from(privateKey, 'base64');
+        // console.log(secretKey);
+        keypair = Ed25519Keypair.fromSecretKey(fromHex(privateKey));
+        // keypair = Ed25519Keypair.fromSecretKey(secretKey);
+        console.log("Successfully created keypair for address:", keypair.getPublicKey().toSuiAddress());
         if (!keypair) {
-            throw new Error("Could not convert the provided string to a valid 32-byte Ed25519 private key. The input must be a 64-character hex string, a 32-byte base64 string, or a valid mnemonic phrase.");
+            throw new Error("Failed to create a valid keypair from the provided private key");
         }
 
-        console.log("Successfully created keypair. Public key:", keypair.getPublicKey().toSuiAddress());
 
-        const client = new SuiClient({ url: getFullnodeUrl("mainnet") });
+        // console.log("Successfully created keypair. Public key:", keypair.getPublicKey().toSuiAddress());
+        console.log("Successfully created keypair. Public key:", keypair);
+
         // Continue with sending SUI...
         // Your existing code to construct and send the transaction
+        const client = new SuiClient({ url: getFullnodeUrl("mainnet") });
         // Create a new transaction block
         const tx = new TransactionBlock();
-
+        // const tx = new Transaction();
+        
         // Convert SUI to MIST (1 SUI = 10^9 MIST)
-        const amountMist = BigInt(Math.floor(amount * 1e9));
+        // const amountMist = BigInt(String(amount * 1e9));
+        const amountMist = BigInt(Math.round(amount * 1e9));
+
+        const ownedCoins = await client.getCoins({
+            owner: keypair.getPublicKey().toSuiAddress(),
+            coinType: "0x2::sui::SUI"
+        });
+        
+        if (!ownedCoins || ownedCoins.data.length === 0) {
+            throw new Error("No SUI coins found in the wallet");
+        }
+        
+        console.log(`Found ${ownedCoins.data.length} coins in wallet`);
 
         // Transfer the specified amount
-        const [coin] = tx.splitCoins(tx.gas, [amountMist]);
-        tx.transferObjects([coin], toAddress);
+        const [coin] = tx.splitCoins(tx.gas, [tx.pure(amountMist)]);
+        console.log("Created coin for transfer:", coin);
+        
+        // Transfer the new coin to the recipient
+        // Make sure coin is defined before transferring
+        if (!coin) {
+            throw new Error("Failed to create coin for transfer");
+        }
+        tx.transferObjects([coin], tx.pure(toAddress));
         tx.setGasBudget(10000000);
 
         // Sign and execute the transaction
         const result = await client.signAndExecuteTransactionBlock({
-            signer: keypair,
+            // transaction: tx,
             transactionBlock: tx,
+            signer: keypair,
+            options: {
+                showEffects: true,
+                showEvents: true,
+            },
         });
+        console.log(result);
 
         return result.digest;
 
@@ -160,7 +138,8 @@ export async function sendSui(privateKeyOrOptions, toAddressParam, amountParam) 
         console.error("Error in sendSui:", error);
         throw error;
     }
-}
+};
+
 
 
 export async function createWithdrawWalletKeyboard(userId) {
@@ -172,14 +151,14 @@ export async function createWithdrawWalletKeyboard(userId) {
     }
 
     const rows = user.wallets.map((wallet, index) => [
-        { text: `🔐 ${wallet.name || "Wallet"} (${shorten(wallet.address)})`, callback_data: `withdraw_wallet_${index}` },
+        { text: `🔐 ${wallet.name || "Wallet"} (${shorten(wallet.wallletAddress)})`, callback_data: `withdraw_wallet_${index}` },
     ]);
 
     rows.push([
         { text: "✅ Continue", callback_data: "withdraw_continue" },
         { text: "❌ Cancel", callback_data: "withdraw_cancel" },
     ]);
-    console.log(rows);
+    // console.log(rows);
 
     return { inline_keyboard: rows };
 }
