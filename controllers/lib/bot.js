@@ -13,7 +13,7 @@ import { generateNewWallet } from "./genNewWallet.js";
 import { userSteps, userTemp } from "./userState.js";
 
 // const bot = new Telegraf(process.env.BOT_TOKEN);
-const bot = new Telegraf('7280147356:AAH9c1N2lDKouexctsDd7x1fmATylHb-Lis');
+const bot = new Telegraf('7280147356:AAEiEsTxsJU0M2qvOyiXJEGz1lhP-K67iMA');
 
 
 // /start → Generate wallet + save to Firestore
