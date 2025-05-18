@@ -7,11 +7,11 @@ export const mainMenu = {
                 { text: "💸 Sell a Token", callback_data: "sell" }
             ],
             [
-                { text: "💼 Wallets", callback_data: "wallets" },
+                { text: "💳 Wallets", callback_data: "wallets" },
             ],
             [
                 { text: "👥 Referrals", callback_data: "referrals" },
-                { text: "⚙️ Positions", callback_data: "positions" }
+                { text: "📈 Positions", callback_data: "positions" }
             ],
             [
                 { text: "⚙️ Config", callback_data: "config" }

@@ -20,7 +20,9 @@ export async function generateNewWallet(userId) {
     const publicKey = keypair.getPublicKey().toSuiAddress();
 
     // Optional: export private key as hex if needed
+    // const exported = keypair.export()
     const privateKey = Buffer.from(keypair.getSecretKey()).toString("hex");
+    // const privateKey = exported.privateKey;
 
     // Fetch current balance
     const balance = await getBalance(publicKey) ?? '0';

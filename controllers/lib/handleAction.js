@@ -1,7 +1,8 @@
-import { handleBuySlippage } from "./buySlippage.js";
-import { getSeedPhrase } from "./db.js";
-import { getPrivateKey } from "./db.js";
-import { fetchUser, saveUser, addWalletToUser } from "./db.js";
+import { buyTokenWithAftermath } from "../aftermath/aftermath.js";
+import { buyTokenSui, buyTokenSuiHop } from "../aggregators/aggregator.js";
+import { generateQRCode } from "../qrcode/genQr.js";
+import { handleBuySlippage, handleSellSlippage } from "./buySlippage.js";
+import { fetchUser, saveUser, addWalletToUser, getUser } from "./db.js";
 import { generateNewWallet } from "./genNewWallet.js";
 import { getBalance } from "./getBalance.js";
 import { handleConnectWallet } from "./handleConnectWallet.js";
@@ -10,13 +11,15 @@ import { mainMenu } from "./mainMenu.js";
 import { userSteps } from "./userState.js";
 import { createWithdrawWalletKeyboard, isValidSuiAddress, sendSui } from "./withdrawSui.js";
 
-
 const slippageSettings = {};
 
-export async function handleAction(ctx, action) {
-    const userId = ctx.from.id;
+export async function handleAction(ctx, action, userId) {
+    // const userId = ctx.from.id;
     switch (true) {
         case action === "/start":
+        case action === "/config":
+        case action === "/positions":
+        case action === "/referrals":
         case action === "/wallets":
 
         case action === "wallets": {
@@ -49,16 +52,67 @@ export async function handleAction(ctx, action) {
             });
         }
 
-        case "positions":
+        case "positions": {
             return ctx.editMessageText("📊 Here are your current positions.");
+        }
 
         case "sniper":
             return ctx.editMessageText("🎯 Sniper mode activated!");
 
-        case "referrals":
-            return ctx.editMessageText("👥 You have 3 referrals.");
+        case action === "referrals": {
+            const userId = ctx.from.id.toString();
+            const user = await getUser(userId);
+            if (!user) {
+                return ctx.reply("User not found. Please start with /start.");
+            }
+            const referralLink = `https://t.me/${ctx.me}?start=ref_${userId}`;
+            const referralCount = user.referredCount || 0;
+            const referralEarnings = user.referralEarnings || 0;
 
-        case action === "config":
+            await ctx.replyWithHTML(`
+                🎁 <b>Your Referral Dashboard</b>
+
+                🔗 <b>Referral Link:</b>
+                <code>${referralLink}</code>
+
+                👥 <b>Users Referred:</b> ${referralCount}
+                💸 <b>Earnings:</b> $${referralEarnings.toFixed(2)} SUI
+
+                ✅ Share your link with friends and earn up to 35% of their trading fees!
+            `, {
+                reply_markup: {
+                    inline_keyboard: [
+                        [
+                            { text: "📎 QR Code", callback_data: "show_qr" },
+                            { text: "❌ Close", callback_data: "close_msg" }
+                        ]
+                    ]
+                }
+            });
+            break;
+        }
+
+        case (action === 'show_qr'): {
+            const userId = ctx.from.id.toString();
+            const referralLink = `https://t.me/${ctx.me}?start=ref_${userId}`;
+            const qrImageBuffer = await generateQRCode(referralLink); // your custom function
+            await ctx.replyWithPhoto({ source: qrImageBuffer }, { caption: "Here is your referral QR code." });
+
+            await ctx.answerCbQuery();
+            break;
+        }
+
+        case (action === 'close_msg'): {
+            try {
+                await ctx.deleteMessage();
+            } catch (err) {
+                console.error("❌ Couldn't delete message:", err.message);
+            }
+            await ctx.answerCbQuery("Closed.");
+            break;
+        }
+
+        case action === "config": {
             const configMenu = {
                 parse_mode: "Markdown",
                 reply_markup: {
@@ -76,6 +130,7 @@ export async function handleAction(ctx, action) {
 
             await ctx.editMessageText("📍 *Settings*", configMenu);
             break;
+        }
 
         case action === "new_wallet": {
             const userId = ctx.from.id;
@@ -109,7 +164,6 @@ export async function handleAction(ctx, action) {
                     ]]
                 }
             });
-            // break;
         }
 
         case action === "x_new_wallets":
@@ -158,24 +212,37 @@ export async function handleAction(ctx, action) {
             break;
         }
 
-        case action.startsWith("set_buy_slippage_"):
+        case action === "set_buy_slippage_all": {
+            const userId = ctx.from.id;
+            userSteps[userId] = "awaiting_buy_slippage_all";
+            return ctx.reply("Enter buy slippage % for *all wallets*:", {
+                parse_mode: "Markdown",
+                reply_markup: {
+                    force_reply: true
+                }
+            });
+        }
+
+        case typeof action === "string" && action.startsWith("set_buy_slippage_"): {
+            // console.log("Action received:", action);
             const index = action.replace("set_buy_slippage_", "");
 
+            const target = index === "all" ? "all" : parseInt(index);
+            // Wait for user's text input
+            userSteps[userId] = {
+                awaitingSlippageInput: true,
+                slippageTarget: target,
+                type: "sell"
+            };
             await ctx.reply("📝 Enter the new buy slippage % (e.g. 1.5):");
-            bot.once("text", async (msg) => {
-                const slippage = parseFloat(msg.text);
-                if (isNaN(slippage) || slippage <= 0 || slippage > 50) {
-                    return ctx.reply("❌ Invalid slippage. Please enter a number between 0.1 and 50.");
-                }
-
-                await setBuySlippage(userId, slippage);
-                await ctx.reply(`✅ Buy slippage updated to ${slippage}%`);
-
-                // Optional: refresh the slippage screen
-                await handleBuySlippage(ctx, userId);
-            });
             break;
+        }
 
+        case action === "sell_slippage": {
+            const userId = ctx.from.id;
+            await handleSellSlippage(ctx, userId);
+            break;
+        }
 
         case action === "set_sell_slippage_all": {
             const userId = ctx.from.id;
@@ -188,37 +255,23 @@ export async function handleAction(ctx, action) {
             });
         }
 
-        case action === "set_buy_slippage_all": {
-            const userId = ctx.from.id;
-            userSteps[userId] = "awaiting_buy_slippage_all";
-            return ctx.reply("Enter buy slippage % for *all wallets*:", {
-                parse_mode: "Markdown",
-                reply_markup: {
-                    force_reply: true
-                }
-            });
+        case typeof action === "string" && action.startsWith("set_sell_slippage_"): {
+            // console.log("Action received:", action);
+            const index = action.replace("set_sell_slippage_", "");
+
+            const target = index === "all" ? "all" : parseInt(index);
+            // Wait for user's text input
+            userSteps[userId] = {
+                awaitingSlippageInput: true,
+                slippageTarget: target,
+                type: "sell"
+            };
+            await ctx.reply("📝 Enter the new sell slippage % (e.g. 1.5):");
+            break;
         }
 
-        case action === "sell_slippage":
-            return ctx.editMessageText("Click on a wallet to set sell slippage % for it:", {
-                parse_mode: "Markdown",
-                reply_markup: {
-                    inline_keyboard: [
-                        [
-                            { text: `✅ All Wallets | ${slippageSettings.all}`, callback_data: "set_sell_slippage_all" }
-                        ],
-                        [
-                            { text: "0x82...7c9b | 1.0%", callback_data: "set_sell_slippage_wallet_1" }
-                        ],
-                        [
-                            { text: "← Back", callback_data: "config" }
-                        ]
-                    ]
-                }
-            });
-
-        case action === "cancel":
-            return ctx.editMessageText("❌ Action cancelled.");
+        // case action === "cancel":
+        //     return ctx.editMessageText("❌ Action cancelled.");
 
         case /^wallet_\d+$/.test(action): {
             const userId = ctx.from.id;
@@ -309,6 +362,41 @@ export async function handleAction(ctx, action) {
             break;
         }
 
+        case action === "refresh":
+            await ctx.answerCallbackQuery({ text: "🔄 Refreshing..." });
+            await ctx.reply("Refreshing token info...");
+            // Re-fetch token details here
+            break;
+
+        case action.startsWith("buy_"): {
+            const amountStr = action.split("_")[1]; // "1.0", "5.0", or "x"
+            console.log(`🛒 User ${userId} wants to buy ${amountStr} SUI`);
+            // await ctx.answerCallbackQuery({ text: `Buying ${amountStr} SUI...` });
+            const user = await getUser(userId);
+            // console.log(user);
+            const phrase = user?.seedPhrase;
+            // console.log(phrase);
+            const address = user?.walletAddress;
+            const step = user?.step
+            // const tokenAddress = step.tokenAddress;
+            const tokenAddress = '0x468b99a00a0b4e5188cef9a7f431d57025774e7749314400881345229fb65d5c::suiper::SUIPER';
+            const suiAmount = parseFloat(amountStr);
+            if (!phrase || !address) {
+                return ctx.reply("❌ Wallet or recovery phrase is not set.");
+            }
+            await ctx.reply("⏳ Buying token...");
+
+            const success = await buyTokenWithAftermath({ userId, tokenAddress, address, suiAmount, phrase });
+            if (success) {
+                ctx.reply(`✅ Successfully bought token with ${suiAmount} SUI.`);
+            } else {
+                ctx.reply("❌ Failed to buy token. Please try again.");
+            }
+
+            await ctx.reply(`Processing purchase of ${amountStr} SUI...`);
+            break;
+        }
+
         case action.startsWith("withdraw_sui_"): {
             const index = Number(action.split("_").pop());
             const userId = ctx.from.id.toString();
@@ -320,8 +408,11 @@ export async function handleAction(ctx, action) {
 
             const user = await fetchUser(userId);
             const selectedWallet = user.wallets[index];
+            console.log('This is the selected wallet', selectedWallet)
+            console.log('This is the selected wallet key', selectedWallet.walletPrivateKey)
+            console.log('This is the selected wallet key', selectedWallet.seedPhrase)
 
-            userSteps[userId].walletPrivateKey = selectedWallet.walletPrivateKey;
+            userSteps[userId].seedPhrase = selectedWallet.seedPhrase;
             userSteps[userId].walletAddress = selectedWallet.walletAddress;
 
             await ctx.answerCbQuery("✅ Wallet selected");
@@ -392,13 +483,13 @@ export async function handleAction(ctx, action) {
             const selectedWallet = user.wallets[selectedWalletIndex];
             console.log("Selected wallet:", {
                 hasAddress: !!selectedWallet.walletAddress,
-                hasPrivateKey: !!selectedWallet.walletPrivateKey,
-                privateKeyType: selectedWallet.walletPrivateKey ? typeof selectedWallet.walletPrivateKey : "N/A"
+                hasPrivateKey: !!selectedWallet.seedPhrase,
+                privateKeyType: selectedWallet.seedPhrase ? typeof selectedWallet.seedPhrase : "N/A"
             });
 
             // Get the wallet's private key - USE THE CORRECT PROPERTY NAME
             // It might be 'privateKey' instead of 'walletPrivateKey'
-            const walletPrivateKey = selectedWallet.walletPrivateKey || selectedWallet.privateKey;
+            const walletPrivateKey = selectedWallet.seedPhrase || selectedWallet.seedPhrase;
 
             if (!walletPrivateKey) {
                 console.error("No private key found in the wallet");
@@ -412,10 +503,6 @@ export async function handleAction(ctx, action) {
 
             // Send the SUI transaction (replace with your own method)
             try {
-                // if (!base64PrivateKey) {
-                // console.error("Missing or invalid sender wallet:", base64PrivateKey);
-                // return ctx.reply("❌ Could not find wallet private key for withdrawal.");
-                // }
                 const tx = await sendSui(
                     walletPrivateKey,
                     withdrawAddress,
@@ -430,6 +517,47 @@ export async function handleAction(ctx, action) {
             } finally {
                 delete userSteps[userId];
             }
+        }
+
+        case action.startsWith("toggle_wallet:"): {
+            const address = action.split(":")[1];
+            const userStep = userSteps[ctx.from.id] || {};
+
+            // You must make sure wallets are fetched or reused
+            const user = await getUser(ctx.from.id);
+            const wallets = user.wallets || [];
+
+            // Store wallets in userStep (used for rendering the keyboard)
+            userStep.wallets = wallets;
+
+            const selected = userStep.selectedWallets || [];
+            if (selected.includes(address)) {
+                userStep.selectedWallets = selected.filter(a => a !== address);
+            } else {
+                userStep.selectedWallets = [...selected, address];
+            }
+
+            userSteps[ctx.from.id] = userStep;
+
+            const updatedText = `Select wallets to use for buying:`; // You can customize this
+
+            await ctx.editMessageText(updatedText, {
+                parse_mode: "HTML",
+                reply_markup: {
+                    inline_keyboard: buildFullKeyboard(userStep.selectedWallets, wallets),
+                }
+            });
+            return;
+        }
+
+
+        case action === "cancel": {
+            // Clear step manually (since you're not using Firebase or a helper)
+            delete userSteps[userId]; // or: userSteps[userId] = undefined;
+
+            await ctx.answerCbQuery("❌ Cancelled");
+            await ctx.reply("Action cancelled.");
+            break;
         }
 
         // Step 2: Continue after wallet selected
@@ -460,4 +588,33 @@ export async function handleAction(ctx, action) {
         default:
             return await ctx.reply("⚠️ Unknown command.");
     }
-}  
+    // return ctx.reply("⚠️ Unknown command.");
+}
+
+
+
+// if (step) {
+//   const userToString = String(userId);
+//   const slippage = parseFloat(text);
+//   console.log(slippage);
+//   if (isNaN(slippage) || slippage <= 0 || slippage > 50) {
+//     return ctx.reply("❌ Invalid slippage. Please enter a number between 0.1 and 50.");
+//   }
+//   try {
+//     if (step === "awaiting_buy_slippage_all") {
+//       await updateAllBuyWalletsSlippage(userToString, slippage);
+//       await ctx.reply(`✅ Buy slippage updated to ${slippage}% for all wallets`);
+//     } else if (step.awaitingSlippageInput) {
+//       const target = step.slippageTarget;
+//       await updateBuySlippage(userToString, target, slippage);
+//       await ctx.reply(`✅ Buy slippage updated to ${slippage}%`);
+//     }
+
+//     delete userSteps[userId]; // Clean up
+//     await handleBuySlippage(ctx, userId); // Show updated menu
+//     return;
+//   } catch (err) {
+//     console.error(err);
+//     return ctx.reply("❌ Failed to update slippage.");
+//   }
+// }
