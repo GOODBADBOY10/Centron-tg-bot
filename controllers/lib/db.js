@@ -14,15 +14,16 @@ admin.initializeApp({
 
 const db = admin.firestore();
 // const bot = new Telegraf('7280147356:AAEiEsTxsJU0M2qvOyiXJEGz1lhP-K67iMA');
-const originalBatch = db.batch;
+// const originalBatch = db.batch;
 
-db.batch = function () {
-    console.warn("🔥 db.batch() was called from:");
-    console.trace(); // Shows you exactly where it's called
-    return originalBatch.call(this);
-};
+// db.batch = function () {
+//     console.warn("🔥 db.batch() was called from:");
+//     console.trace(); // Shows you exactly where it's called
+//     return originalBatch.call(this);
+// };
 
 // // Save/update user in Firestore
+
 export async function saveUser(userId, data) {
     const userRef = db.collection('users').doc(userId.toString());
     await userRef.set(data, { merge: true });
@@ -34,25 +35,47 @@ export async function fetchUser(userId) {
 
     return doc.exists ? doc.data() : null;
 }
+
 // // Get user from Firestore
 export async function getUser(userId) {
-    // const userId = ctx.from.id;
-    // const chatId = ctx.chat.id;
     const user = await fetchUser(userId);
     if (!user) {
-        // Send welcome message
-        //bot.sendMessage(chatId, `👋 What can this bot do? 
-        //  Fastest sniper/trading bot on SUI by $centron-bot 
-        // Earn up to 35% of your friends' trading fees with our 5-layered referral system`
-        // );
+        const referral = referrerCode ? referrerCode.replace('ref_', '') : null;
+        await saveUser(userId, {
+            referralCode: `ref_${userId}`,        // the code user can share
+            referredBy: referral || null,         // the code they used to join
+            referrals: 0,                         // will increment as they refer others
+            step: {
+                tokenAddress: "0x123...::TOKEN::ABC",
+                tokenSymbol: "ABC"
+            },
+            firstVisit: Date.now()
+        });
 
-        // Save user
-        await saveUser(userId, { firstVisit: Date.now() });
-        //}
-        const doc = await db.collection("users").doc(userId.toString()).get();
-        return doc.exists ? (doc.data()) : null;
+        user = await fetchUser(userId); // refetch after saving
+    }
+    return user;
+}
+
+export async function incrementReferrer(referrerCode) {
+    if (!referrerCode) return;
+
+    const referrerId = referrerCode.replace('ref_', '');
+    const userRef = db.collection('users').doc(referrerId);
+
+    try {
+        await db.runTransaction(async (t) => {
+            const doc = await t.get(userRef);
+            if (!doc.exists) return;
+
+            const current = doc.data().referrals || 0;
+            t.update(userRef, { referrals: current + 1 });
+        });
+    } catch (e) {
+        console.error(`Error incrementing referrals for ${referrerId}:`, e);
     }
 }
+
 
 export async function addWalletToUser(userId, wallet) {
     const db = admin.firestore();
@@ -83,19 +106,23 @@ export async function addWalletToUser(userId, wallet) {
         }
     }
 
+    if (!cleanWallet.walletAddress && cleanWallet.address) {
+        cleanWallet.walletAddress = cleanWallet.address;
+    }
+
     try {
         const dataToSave = {
             wallets: admin.firestore.FieldValue.arrayUnion(cleanWallet),
+            walletAddress: cleanWallet.walletAddress // optional main walletAddress field
         };
 
-        if (cleanWallet.walletAddress !== undefined) {
-            dataToSave.walletAddress = cleanWallet.walletAddress;
-        }
-        await db.collection("users").doc(userId).set({
-            ...dataToSave
+        // if (cleanWallet.walletAddress !== undefined) {
+        //     dataToSave.walletAddress = cleanWallet.walletAddress;
+        // }
+        await db.collection("users").doc(userId).set(dataToSave
             // walletAddress: cleanWallet.walletAddress,
             // wallets: admin.firestore.FieldValue.arrayUnion(cleanWallet)
-        }, { merge: true });
+            , { merge: true });
 
         console.log("✅ Wallet saved to Firestore");
     } catch (error) {
@@ -103,13 +130,6 @@ export async function addWalletToUser(userId, wallet) {
     }
 }
 
-//getting the private key
-/**
- * Get the Base64-encoded private key for a user's wallet (Firebase Admin).
- * @param {string} telegramUserId - Telegram user ID. userId
- * @param {string} walletAddress - Wallet address to fetch the key for.
- * @returns {Promise<string>} - Base64-encoded private key.
- */
 export async function getPrivateKey(userId, walletAddress) {
     if (!userId || !walletAddress) {
         throw new Error(`Invalid input: userId=${userId}, walletAddress=${walletAddress}`);
@@ -165,29 +185,110 @@ export async function getSeedPhrase(userId, walletAddress) {
 }
 
 
-export async function setBuySlippage(userId, slippage) {
-    return db.collection("users").doc(userId).set({
-        settings: {
-            buySlippage: slippage
-        }
-    }, { merge: true });
+export async function setBuySlippage(userId, slippage, target) {
+    const user = await fetchUser(userId);
+    if (!user || !user.wallets) return;
+
+    if (target === "all") {
+        // Update all
+        user.buyAllSlippage = slippage;
+        user.wallets = user.wallets.map(w => ({ ...w, buySlippage: slippage }));
+    } else if (typeof target === "number" && user.wallets[target]) {
+        user.wallets[target].buySlippage = slippage;
+    }
+
+    await updateBuySlippage(userId, user); // update DB
 }
 
-export async function updateBuySlippage(userId, walletAddress, slippage) {
+
+export async function setSellSlippage(userId, slippage, target) {
+    const user = await fetchUser(userId);
+    if (!user || !user.wallets) return;
+
+    if (target === "all") {
+        // Update all
+        user.sellAllSlippage = slippage;
+        user.wallets = user.wallets.map(w => ({ ...w, sellSlippage: slippage }));
+    } else if (typeof target === "number" && user.wallets[target]) {
+        user.wallets[target].sellSlippage = slippage;
+    }
+
+    await updateSellSlippage(userId, user); // update DB
+}
+
+
+export async function updateBuySlippage(userId, target, slippage) {
     const db = admin.firestore();
-    const userRef = db.collection("users").doc(userId);
+    const userRef = db.collection('users').doc(userId);
     const userSnap = await userRef.get();
-    if (!userSnap.exists) return;
+
+    if (!userSnap.exists) {
+        throw new Error(`User with ID ${userId} not found`);
+    }
 
     const userData = userSnap.data();
-    const updatedWallets = userData.wallets.map(wallet => {
-        if (wallet.walletAddress === walletAddress) {
-            return { ...wallet, buySlippage: slippage };
-        }
-        return wallet;
-    });
 
-    await userRef.update({ wallets: updatedWallets });
+    if (target === "all") {
+        // Update all wallet slippage and buyAllSlippage
+        const updatedWallets = (userData.wallets || []).map(wallet => ({
+            ...wallet,
+            buySlippage: slippage,
+        }));
+
+        await userRef.update({
+            buyAllSlippage: slippage,
+            wallets: updatedWallets,
+        });
+    } else if (typeof target === "number") {
+        // Update only one wallet by index
+        const wallets = [...(userData.wallets || [])];
+        if (!wallets[target]) {
+            throw new Error(`Wallet at index ${target} not found`);
+        }
+
+        wallets[target].buySlippage = slippage;
+
+        await userRef.update({ wallets });
+    } else {
+        throw new Error(`Invalid target: ${target}`);
+    }
+}
+
+export async function updateSellSlippage(userId, target, slippage) {
+    const db = admin.firestore();
+    const userRef = db.collection('users').doc(userId);
+    const userSnap = await userRef.get();
+
+    if (!userSnap.exists) {
+        throw new Error(`User with ID ${userId} not found`);
+    }
+
+    const userData = userSnap.data();
+
+    if (target === "all") {
+        // Update all wallet slippage and buyAllSlippage
+        const updatedWallets = (userData.wallets || []).map(wallet => ({
+            ...wallet,
+            sellSlippage: slippage,
+        }));
+
+        await userRef.update({
+            sellAllSlippage: slippage,
+            wallets: updatedWallets,
+        });
+    } else if (typeof target === "number") {
+        // Update only one wallet by index
+        const wallets = [...(userData.wallets || [])];
+        if (!wallets[target]) {
+            throw new Error(`Wallet at index ${target} not found`);
+        }
+
+        wallets[target].sellSlippage = slippage;
+
+        await userRef.update({ wallets });
+    } else {
+        throw new Error(`Invalid target: ${target}`);
+    }
 }
 
 export async function deleteUser(userId) {
@@ -209,4 +310,21 @@ export async function updateWalletBalance(userId, walletAddress, newBalance) {
     );
 
     await userRef.update({ wallets: updatedWallets });
+}
+
+export async function updateUser(userId, updatedUserData) {
+    const userRef = db.collection('users').doc(userId.toString());
+    await userRef.set(updatedUserData, { merge: true });
+}
+
+
+
+export async function getReferralStats(userId) {
+    const user = await fetchUser(userId);
+    if (!user) return "User not found.";
+
+    const link = `https://t.me/YOUR_BOT_USERNAME?start=${user.referralCode}`;
+    const count = user.referrals || 0;
+
+    return `🔗 Your reflink: ${link}\n👥 Referrals: ${count}`;
 }

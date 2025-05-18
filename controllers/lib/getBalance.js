@@ -10,7 +10,9 @@ export async function getBalance(address) {
     
     try {
         const balanceResult = await suiClient.getBalance({ owner: address });
-        return balanceResult.totalBalance;
+        const mistBalance = BigInt(balanceResult.totalBalance);
+        const suiBalance = Number(mistBalance) / 1e9;
+        return Number((suiBalance).toFixed(3));
     } catch (error) {
         console.error('Error fetching balance:', error);
         return null;

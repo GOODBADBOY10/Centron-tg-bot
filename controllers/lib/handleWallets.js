@@ -29,7 +29,7 @@ export async function handleWallets(ctx, userId) {
         })
     );
     try {
-        await ctx.reply(`💼 *Wallets [${userWallets.length}]*`, {
+        await ctx.reply(`💳 *Wallets [${userWallets.length}]*`, {
             parse_mode: "Markdown",
             reply_markup: {
                 inline_keyboard: [
