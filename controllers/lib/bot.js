@@ -9,18 +9,21 @@ import { mainMenu } from "./mainMenu.js";
 import { handleWallets } from "./handleWallets.js";
 import { generateNewWallet } from "./genNewWallet.js";
 import { userSteps, userTemp } from "./userState.js";
-import { formatPrice, getCoinBalance, getTokenDetails } from "../../utils/getTokenDetails.js";
-import { getTokenDetailsCetus } from "./buyToken.js";
+import { formatPrice, getCoinBalance, getInsidexTokenDetails, getTokenDetails } from "../../utils/getTokenDetails.js";
 import { handleBuySlippage, handleSellSlippage, updateAllBuyWalletsSlippage, updateAllSellWalletsSlippage } from "./buySlippage.js";
 import { updateBuySlippage } from "./db.js";
 import { updateSellSlippage } from "./db.js";
-import { buyTokenSui } from "../aggregators/aggregator.js";
 import { incrementReferrer } from "./db.js";
+import { buyTokenWithAftermath, sellTokenWithAftermath } from "../aftermath/aftermath.js";
+import { AggregatorClient } from "@cetusprotocol/aggregator-sdk"
+import { toSmallestUnit } from "./suiAmount.js";
+
 
 // const bot = new Telegraf(process.env.BOT_TOKEN);
 const bot = new Telegraf('7280147356:AAEiEsTxsJU0M2qvOyiXJEGz1lhP-K67iMA');
 bot.use(session());
 
+const client = new AggregatorClient({})
 
 // /start → Generate wallet + save to Firestore
 bot.start(async (ctx) => {
@@ -96,7 +99,6 @@ bot.start(async (ctx) => {
   });
 });
 
-
 // ➡️ Continue handler (you can show the menu here)
 bot.hears("➡️ Continue", async (ctx) => {
   const userId = ctx.from.id;
@@ -115,61 +117,213 @@ bot.hears("➡️ Continue", async (ctx) => {
 
   await ctx.reply(`👋 *Welcome to Centron Bot*\n
     Trade tokens on SUI with the fastest trading bot. All DEXes + MovePump are supported.\n
-    ⬇️ *Your Wallet Address (Click to Copy)*\n\`${user.walletAddress}\`\n
   ⬇️ *Invite friends* and earn up to *35%* of their trading fees with our 5-layered referral system!`, {
     parse_mode: "Markdown",
     ...mainMenu,
   });
-
-  // await ctx.deleteMessage();
 });
 
 async function getFallbackTokenDetails(tokenAddress, walletAddress) {
   try {
-    const tokenInfo = await getTokenDetailsCetus(tokenAddress);
-    if (tokenInfo?.data) {
-      console.log('Token info from Cetus:', tokenInfo.data, tokenInfo);
-      return { tokenInfo, source: 'cetus' };
+    const tokenInfo = await getInsidexTokenDetails(tokenAddress);
+    if (tokenInfo?.length) {
+      return {
+        tokenInfo: tokenInfo[0], // Take first item from array
+        source: "Insidex"
+      };
     }
   } catch (err) {
-    console.log('Cetus failed:', err.message || err);
+    console.log('Insidex failed:', err.message || err);
   }
 
   try {
     const tokenInfo = await getTokenDetails(tokenAddress, walletAddress);
-    if (tokenInfo?.data?.baseToken?.name) {
-      console.log('Token info from fallback:', tokenInfo.data);
-      return { tokenInfo, source: 'fallback' };
+    if (tokenInfo) {
+      return {
+        tokenInfo,
+        source: "Dexscreener"
+      };
     }
   } catch (err) {
-    console.log('Fallback failed:', err.message || err);
+    console.log('Dexscrener failed:', err.message || err);
   }
 
   return null;
+}
+
+function shortAddress(address) {
+  if (typeof address !== "string") {
+    console.error("Expected address to be a string but got:", address);
+    return "InvalidAddr";
+  }
+
+  if (address.length < 10) {
+    console.warn("Address too short to abbreviate:", address);
+    return address;  // or return "ShortAddr" if you prefer a label
+  }
+
+  return `${address.slice(0, 6)}...${address.slice(-4)}`;
 }
 
 function getReferralCode(userId) {
   return `ref_${Buffer.from(userId.toString()).toString('base64').slice(0, 6)}`;
 }
 
-function buildFullKeyboard(selectedWallets, allWallets) {
-  const walletButtons = allWallets.map(w => {
-    const isSelected = selectedWallets.includes(w.address);
-    return [{
-      text: `${isSelected ? '🟢' : '⚪'} ${shortAddress(w.address)}`,
-      callback_data: `toggle_wallet_${w.address}`
-    }];
-  });
-
-  const buyButtons = [
-    [{ text: 'Buy 10 SUI', callback_data: 'buy_10' }, { text: 'Buy 50 SUI', callback_data: 'buy_50' }],
-    [{ text: 'Buy 100 SUI', callback_data: 'buy_100' }, { text: 'Buy 500 SUI', callback_data: 'buy_500' }],
-    [{ text: 'Buy 1000 SUI', callback_data: 'buy_1000' }],
-    [{ text: 'Buy Custom SUI', callback_data: 'buy_custom' }]
-  ];
-
-  return [...walletButtons, ...buyButtons];
+function capitalize(str) {
+  return str.charAt(0).toUpperCase() + str.slice(1);
 }
+
+
+export function buildFullKeyboard(selectedWallets, allWallets, showAll = false, mode = "buy") {
+  console.log("buildFullKeyboard called with mode:", mode);
+  const selectedLower = selectedWallets
+    .map(a => (typeof a === 'string' ? a.toLowerCase() : ''))
+    .filter(Boolean);
+
+  const allLower = allWallets
+    .map(w => (typeof w === 'string' ? w.toLowerCase() : ''))
+    .filter(Boolean);
+
+  const walletsToShow = showAll ? allLower : allLower.slice(0, 4); // Show first 4 if not toggled
+
+  const rows = [];
+
+  rows.push([
+    { text: showAll ? "All Wallets" : "💳 Wallets 💳", callback_data: "toggle_all_wallets" }
+  ]);
+
+  for (let i = 0; i < walletsToShow.length; i += 2) {
+    const row = [];
+    for (let j = i; j < i + 2 && j < walletsToShow.length; j++) {
+      const address = walletsToShow[j];
+      const isSelected = selectedLower.includes(address);
+      row.push({
+        text: `${isSelected ? "🟢" : "🔘"} ${shortAddress(address)}`,
+        callback_data: `toggle_wallet:${j}`,
+      });
+    }
+    rows.push(row);
+  }
+
+  rows.push([
+    { text: "Buy ↔ Sell", callback_data: "toggle_mode" },
+  ]);
+
+  const prefixIcon = mode === "buy" ? "🛒" : "💸";
+  const action = mode;
+  if (mode === "buy") {
+    rows.push([
+      { text: `${prefixIcon} Buy 1 SUI`, callback_data: `${action}_1` },
+      { text: `${prefixIcon} Buy 5 SUI`, callback_data: `${action}_5` }
+    ]);
+    rows.push([
+      { text: `${prefixIcon} Buy X SUI`, callback_data: `${action}_x` }
+    ]);
+  } else if (mode === "sell") {
+    rows.push([
+      { text: `${prefixIcon} Sell 25%`, callback_data: `${action}_25` },
+      { text: `${prefixIcon} Sell 50%`, callback_data: `${action}_50` }
+    ]);
+    rows.push([
+      { text: `${prefixIcon} Sell 100%`, callback_data: `${action}_100` }
+    ]);
+  }
+
+  rows.push([
+    { text: "❌ Cancel", callback_data: "cancel_to_main" },
+    { text: "🔄 Refresh", callback_data: "refresh_info" }
+  ]);
+
+  return rows;
+}
+
+export async function renderMainMessage(ctx, userId) {
+  const step = userSteps[userId];
+  const selectedWallets = step.selectedWallets || [];
+  const tokenInfo = step.tokenInfo;
+  const tokenName = tokenInfo.name;
+  const tokenSymbol = tokenInfo.symbol;
+  // const quoteSymbol = tokenInfo?.data?.quoteToken?.symbol;
+  const token_address = tokenInfo.address;
+  // const isSuiPair = quoteSymbol === "SUI";
+
+  const balances = await Promise.all(selectedWallets.map(async (wallet) => {
+    const tokenBalance = await getCoinBalance(wallet, token_address);
+    const suiBalance = await getBalance(wallet);
+    return { wallet, suiBalance, tokenBalance };
+  }));
+
+
+  let formattedMessage = `CENTRON BOT⚡\n\n`;
+  formattedMessage += `📈 ${tokenName} (${tokenSymbol}/SUI)\n\n`;
+  formattedMessage += `🪙 CA: <code>${token_address}</code>\n`;
+  formattedMessage += `💵 Price (USD): $${tokenInfo.price}\n`;
+  formattedMessage += `🏦 Market Cap: ${formatPrice(Number(tokenInfo.marketCap))}\n`;
+  formattedMessage += `🧬 Coin Type: ${tokenInfo.coinType || "N/A"}\n`;
+  formattedMessage += `📅 Created: ${new Date(tokenInfo.date).toLocaleString()}\n\n`;
+  formattedMessage += `Selected Wallets:\n`;
+  balances.forEach(({ wallet, suiBalance, tokenBalance }) => {
+    formattedMessage += ` 💳 ${shortAddress(wallet)} | ${suiBalance} SUI | ${tokenBalance.balance} ${tokenSymbol} | $${tokenBalance.balanceUsd} \n`;
+  });
+  const keyboard = {
+    inline_keyboard: buildFullKeyboard(
+      selectedWallets,
+      step.wallets,
+      step.showAllWallets ?? false,
+      step.mode
+    )
+  };
+
+  try {
+    await ctx.telegram.editMessageText(
+      ctx.chat.id,
+      step.mainMessageId,
+      undefined,
+      formattedMessage,
+      {
+        parse_mode: "HTML",
+        reply_markup: keyboard
+      }
+    );
+  } catch (e) {
+    console.warn("Failed to update message:", e.message);
+  }
+}
+
+
+bot.use(async (ctx, next) => {
+  if (ctx.message?.text?.startsWith("/")) {
+    const userId = ctx.from.id;
+    if (!userSteps[userId]) userSteps[userId] = {};
+    userSteps[userId].state = null; // Reset state on any command
+  }
+  await next();
+});
+
+
+// bot.command("config", async (ctx) => {
+//   const configMenu = {
+//     parse_mode: "Markdown",
+//     reply_markup: {
+//       inline_keyboard: [
+//         [
+//           { text: "✏️ Buy Slippage", callback_data: "buy_slippage" },
+//           { text: "✏️ Sell Slippage", callback_data: "sell_slippage" }
+//         ],
+//         [
+//           { text: "← Back", callback_data: "back_to_menu" }
+//         ]
+//       ]
+//     }
+//   };
+
+//   try {
+//     // Either send new message or edit existing message if possible
+//     await ctx.reply("📍 *Settings*", configMenu);
+//   } catch (err) {
+//     console.error("Failed to send /config menu:", err);
+//   }
+// });
 
 
 bot.on("message", async (ctx, next) => {
@@ -179,19 +333,13 @@ bot.on("message", async (ctx, next) => {
   const replyTo = ctx.message?.reply_to_message?.text;
   const step = userSteps[userId];
   const user = await fetchUser(userId);
-  // const slippage = parseFloat(ctx.message.text);
 
-  // first reply
-  if (ctx.message.text) {
-    const text = ctx.message.text;
-    handleAction(ctx, text);
-  }
+  if (!text) return;
 
   //connecting wallet
   if (ctx.message?.reply_to_message?.text?.includes("mnemonic") || ctx.message?.reply_to_message?.text?.includes("privatekey")) {
     const userInput = ctx.message.text.trim();
     // console.log(userInput);
-
     try {
       const imported = await importWalletFromInput(userInput);
       console.log(userInput);
@@ -202,7 +350,7 @@ bot.on("message", async (ctx, next) => {
       await addWalletToUser(userToString, {
         address: imported.address,
         privateKey: imported.privateKey,
-        ...(imported.phrase ? { phrase: imported.phrase } : {}),
+        ...(imported.phrase ? { seedPhrase: imported.phrase } : {}),
       });
 
       await saveUser(userId, { awaitingWallet: false });
@@ -260,11 +408,11 @@ bot.on("message", async (ctx, next) => {
     }
 
     try {
-      if (step === "awaiting_buy_slippage_all") {
+      if (step.scope === "all" && step.type === "buy") {
         await updateAllBuyWalletsSlippage(userToString, slippage);
         await ctx.reply(`✅ Buy slippage updated to ${slippage}% for all wallets`);
         await handleBuySlippage(ctx, userId);
-      } else if (step === "awaiting_sell_slippage_all") {
+      } else if (step.scope === "all" && step.type === "sell") {
         await updateAllSellWalletsSlippage(userToString, slippage);
         await ctx.reply(`✅ Sell slippage updated to ${slippage}% for all wallets`);
         await handleSellSlippage(ctx, userId);
@@ -289,131 +437,134 @@ bot.on("message", async (ctx, next) => {
     }
   }
 
-
   // buy token
   if (step?.state === "awaiting_buy_token_address") {
     const tokenAddress = ctx.message.text?.trim();
+    // userSteps[userId].mode = userSteps[userId].mode === "buy" ? "sell" : "buy";
+    const mode = userSteps[userId].mode;
     const user = await getUser(userId);
-    const wallets = user.wallets || []
-    const userStep = userSteps[userId] || {};
-    console.log('steps', userStep)
-    const selectedWallets = userStep.selectedWallets || [];
-    console.log('selected-wallets', selectedWallets);
+    const rawWallets = user.wallets || [];
+    const wallets = rawWallets
+      .filter(w => typeof w === 'object' && (w.walletAddress || w.address)) // Only valid objects
+      .map(w => {
+        const address = w.walletAddress || w.address;
+        const seedPhrase = w.seedPhrase || w.phrase || null; // normalize phrase key
+        const buySlippage = w.buySlippage;   // default to 15 if missing
+        const sellSlippage = w.sellSlippage; // default to 20 if missing
+        return {
+          ...w,
+          address, // normalize it
+          seedPhrase,
+          buySlippage,
+          sellSlippage
+        };
+      });
+    // console.log('wallets', wallets);
+    let selectedWallets = (userSteps[userId]?.selectedWallets || []).map(w => w.toLowerCase());
+    const normalizedWallets = wallets.map(w => (w.address || w.walletAddress).toLowerCase());
+    userSteps[userId].wallets = normalizedWallets;
+    const currentWallet = (userSteps[userId]?.currentWallet || '').toLowerCase();
+    // console.log('current wallet', currentWallet);
+
+    // Default selection
+    if (currentWallet && !selectedWallets.includes(currentWallet)) {
+      selectedWallets = [currentWallet];
+      userSteps[userId].selectedWallets = selectedWallets;
+    }
+
+    // Find the current wallet object from wallets
+    const currentWalletObj = wallets.find(w => (w.address || w.walletAddress).toLowerCase() === currentWallet);
+    // Save the normalized seed phrase into userSteps
+    if (currentWalletObj) {
+      userSteps[userId].seedPhrase = currentWalletObj.seedPhrase || currentWalletObj.phrase || null;
+      userSteps[userId].buySlippage = currentWalletObj.buySlippage;  // default 15
+      userSteps[userId].sellSlippage = currentWalletObj.sellSlippage; // default 20
+    } else {
+      userSteps[userId].seedPhrase = null; // or keep previous, your choice
+      userSteps[userId].buySlippage = 0.01;
+      userSteps[userId].sellSlippage = 0.01;
+    }
+    // console.log('selectedWallets before formatting:', selectedWallets);
     if (!tokenAddress || !tokenAddress.includes("::")) {
-      return ctx.reply("❌ Invalid token address format.");
+      await ctx.reply("❌ Invalid token address format.");
+      return;
     }
-
-    if (!selectedWallets.length) {
-      return ctx.reply("❌ Please select at least one wallet.");
-    }
-
     try {
-      const previewWallet = selectedWallets[0]?.address;
-      const result = await getFallbackTokenDetails(tokenAddress, previewWallet);
-      // const result = await getFallbackTokenDetails(tokenAddress, walletAddress);
-      console.log(result);
+      const result = await getFallbackTokenDetails(tokenAddress, selectedWallets[0]);
+      console.log('result', result);
       if (!result) {
         return ctx.reply("❌ Token not found or no liquidity.");
       }
+
       const { tokenInfo, source } = result;
-      // let tokenBalance = { balance: 0, balanceUsd: 0 };
-      // let suiBalance = 0;
-      const isSuiPair = tokenInfo.data.quoteToken.symbol === "SUI";
+      // const isSuiPair = tokenInfo.data.quoteToken.symbol === "SUI";
+      // const isSuiPair = tokenInfo.decimals === "SUI";
 
       const balances = await Promise.all(selectedWallets.map(async (wallet) => {
-        const tokenBalance = isSuiPair
-          ? await getCoinBalance(wallet, tokenInfo.data.baseToken.address)
-          : { balance: 0, balanceUsd: 0 };
+        const tokenBalance = await getCoinBalance(wallet, tokenInfo.address);
         const suiBalance = await getBalance(wallet);
-
-        return {
-          wallet,
-          suiBalance,
-          tokenBalance
-        };
+        return { wallet, suiBalance, tokenBalance };
       }));
 
-
-      // if (isSuiPair) {
-      //   // Fetch token balance
-      //   token_balance = await getCoinBalance(walletAddress, tokenInfo.data.baseToken.address);
-      //   suiBalance = await getBalance(walletAddress);
-      //   // const suiBalance = 0;
-      //   const args = {
-      //     token_balance: token_balance,
-      //     token_name: tokenInfo?.data?.baseToken?.name,
-      //     token_symbol: tokenInfo?.data?.baseToken?.symbol,
-      //     chart: tokenInfo?.data?.url,
-      //     scan: `https://suiscan.xyz/mainnet/coin/${tokenInfo?.data.baseToken.address}/txs`,
-      //     ca: tokenInfo?.data?.baseToken?.address,
-      //   }
-      // }
-
-      userSteps[userId] = {
-        state: null,
-        tokenInfo,
-        selectedWallets,
-        wallets: user.wallets.map(w => w.address),
-      };
-
-      //   const formattedString = `
-      //       <code>CENTRON BOT⚡<code>
-
-      //  📈 ${tokenInfo?.data.baseToken.name}
-      //  ${tokenInfo?.data.baseToken.symbol} / ${tokenInfo?.data.quoteToken.symbol}
-
-      //  🪙 CA: ${tokenInfo?.data.baseToken.address}
-      // 🔄 LP: ${tokenInfo?.data.dexId}
-
-      // 💵 Price (USD): $${tokenInfo?.data.priceUsd}
-      // 💱 Price : ${tokenInfo?.data.priceNative} ${tokenInfo?.data.quoteToken.symbol}
-
-      // 💧 Liquidity (USD): ${formatPrice(Number(tokenInfo?.data.liquidity.usd))}
-
-      // Selected wallets:
-      // ${selectedWallets.length === 0 ? 'None selected' : selectedWallets.map(w => `🟢 ${shortAddress(w)}`).join('\n')}
-
-      // 📊 FDV: ${formatPrice(Number(tokenInfo?.data.fdv))}
-      // 🏦 Market Cap: ${formatPrice(Number(tokenInfo?.data.marketCap))}
-
-      // 📅 Created: ${new Date(tokenInfo?.data.pairCreatedAt).toLocaleString()}
-      // ----------------------------------------------------------------
-      // 📬 Wallet Address: \`${walletAddress}\`
-      // 💰 Balance: ${suiBalance} SUI💧
-      // 💰 Balance: ${token_balance.balance} ${tokenInfo?.data.baseToken.symbol} | $${token_balance.balanceUsd}
-      // `;
-
-      const tokenName = tokenInfo?.data.baseToken.name;
-      const tokenSymbol = tokenInfo?.data.baseToken.symbol;
-      const quoteSymbol = tokenInfo?.data.quoteToken.symbol;
-      const formattedLiquidity = formatPrice(Number(tokenInfo?.data.liquidity.usd));
-
-      let formattedMessage = `<code>CENTRON BOT⚡</code>\n\n`;
-      formattedMessage += `📈 ${tokenName} (${tokenSymbol}/${quoteSymbol})\n\n`;
-      formattedMessage += `🪙 CA: ${tokenInfo?.data.baseToken.address}\n`;
-      formattedMessage += `🔄 LP: ${tokenInfo?.data.dexId}\n\n`;
-      formattedMessage += `💵 Price (USD): $${tokenInfo?.data.priceUsd}\n`;
-      formattedMessage += `💱 Price: ${tokenInfo?.data.priceNative} ${quoteSymbol}\n`;
-      formattedMessage += `💧 Liquidity (USD): ${formattedLiquidity}\n\n`;
-
-      formattedMessage += `📊 FDV: ${formatPrice(Number(tokenInfo?.data.fdv))}\n`;
-      formattedMessage += `🏦 Market Cap: ${formatPrice(Number(tokenInfo?.data.marketCap))}\n`;
-      formattedMessage += `📅 Created: ${new Date(tokenInfo?.data.pairCreatedAt).toLocaleString()}\n\n`;
-
+      // const quoteSymbol = tokenInfo?.symbol;
+      const tokenName = tokenInfo.name;
+      const tokenSymbol = tokenInfo.symbol;
+      const token_address = tokenInfo.address;
+      let formattedMessage = `CENTRON BOT⚡\n\n`;
+      formattedMessage += `📈 ${tokenName} (${tokenSymbol}/SUI)\n\n`;
+      formattedMessage += `🪙 CA: <code>${token_address}</code>\n`;
+      formattedMessage += `💵 Price (USD): $${tokenInfo.price}\n`;
+      formattedMessage += `🏦 Market Cap: ${formatPrice(Number(tokenInfo.marketCap))}\n`;
+      formattedMessage += `🧬 Coin Type: ${tokenInfo.coinType || "N/A"}\n`;
+      formattedMessage += `📅 Created: ${new Date(tokenInfo.date).toLocaleString()}\n\n`;
       formattedMessage += `Selected Wallets:\n`;
       balances.forEach(({ wallet, suiBalance, tokenBalance }) => {
-        formattedMessage += `🟢 \`${wallet}\`\n`;
-        formattedMessage += `   🔹 SUI: ${suiBalance} 💧\n`;
-        formattedMessage += `   🔸 ${tokenSymbol}: ${tokenBalance.balance} | $${tokenBalance.balanceUsd}\n\n`;
+        formattedMessage += ` 💳 ${shortAddress(wallet)} | ${suiBalance} SUI | ${tokenBalance.balance} ${tokenSymbol} | $${tokenBalance.balanceUsd} \n`;
       });
+      // let tokenBalance = { balance: 0, balanceUsd: 0 };
+      // let suiBalance = 0;
 
-      await ctx.reply(formattedMessage, {
-        parse_mode: "HTML",
-        reply_markup: {
-          inline_keyboard: buildFullKeyboard(selectedWallets, user.wallets)
+      if (!userSteps[userId]) userSteps[userId] = {};
+      userSteps[userId].tokenInfo = tokenInfo;
+      userSteps[userId].tokenAddress = tokenAddress;
+      userSteps[userId].wallets = wallets.map(w => w.address);
+      // Also save phrase here if you want
+      // const currentWalletObj = wallets.find(w => (w.address || w.walletAddress).toLowerCase() === (userSteps[userId]?.currentWallet || '').toLowerCase());
+      // userSteps[userId].seedPhrase = currentWalletObj?.seedPhrase || currentWalletObj?.phrase || null;
+
+       const keyboard = {
+        inline_keyboard: buildFullKeyboard(selectedWallets, wallets.map(w => w.address), false, mode)
+      };
+
+      if (userSteps[userId]?.mainMessageId) {
+        // Try editing the existing main message
+        try {
+          await ctx.telegram.editMessageText(
+            ctx.chat.id,
+            userSteps[userId].mainMessageId,
+            undefined,
+            formattedMessage,
+            {
+              parse_mode: "HTML",
+              reply_markup: keyboard
+            }
+          );
+        } catch (err) {
+          console.warn("editMessageText failed, sending new message instead");
+          const sent = await ctx.reply(formattedMessage, {
+            parse_mode: "HTML",
+            reply_markup: keyboard
+          });
+          userSteps[userId].mainMessageId = sent.message_id;
         }
-      })
-
+      } else {
+        // First time showing main message
+        const sent = await ctx.reply(formattedMessage, {
+          parse_mode: "HTML",
+          reply_markup: keyboard
+        });
+        userSteps[userId].mainMessageId = sent.message_id;
+      }
 
     } catch (error) {
       console.error(error);
@@ -421,11 +572,227 @@ bot.on("message", async (ctx, next) => {
     }
   }
 
+  //sell token
+  if (step?.state === "awaiting_sell_token_address") {
+    const tokenAddress = ctx.message.text?.trim();
+    // userSteps[userId].mode = userSteps[userId].mode === "sell" ? "buy" : "sell";
+    const mode = userSteps[userId].mode;
+    console.log('modeeeee', mode);
+    console.log("what is happening", userSteps[userId])
+    const user = await getUser(userId);
+    const rawWallets = user.wallets || [];
+    const wallets = rawWallets
+      .filter(w => typeof w === 'object' && (w.walletAddress || w.address)) // Only valid objects
+      .map(w => {
+        const address = w.walletAddress || w.address;
+        const seedPhrase = w.seedPhrase || w.phrase || null; // normalize phrase key
+        const buySlippage = w.buySlippage;   // default to 15 if missing
+        const sellSlippage = w.sellSlippage; // default to 20 if missing
+        return {
+          ...w,
+          address, // normalize it
+          seedPhrase,
+          buySlippage,
+          sellSlippage
+        };
+      });
+    // console.log('wallets', wallets);
+    let selectedWallets = (userSteps[userId]?.selectedWallets || []).map(w => w.toLowerCase());
+    const normalizedWallets = wallets.map(w => (w.address || w.walletAddress).toLowerCase());
+    userSteps[userId].wallets = normalizedWallets;
+    const currentWallet = (userSteps[userId]?.currentWallet || '').toLowerCase();
+    // console.log('current wallet', currentWallet);
+
+    // Default selection
+    if (currentWallet && !selectedWallets.includes(currentWallet)) {
+      selectedWallets = [currentWallet];
+      userSteps[userId].selectedWallets = selectedWallets;
+    }
+
+    // Find the current wallet object from wallets
+    const currentWalletObj = wallets.find(w => (w.address || w.walletAddress).toLowerCase() === currentWallet);
+    // Save the normalized seed phrase into userSteps
+    if (currentWalletObj) {
+      userSteps[userId].seedPhrase = currentWalletObj.seedPhrase || currentWalletObj.phrase || null;
+      userSteps[userId].buySlippage = currentWalletObj.buySlippage;  // default 15
+      userSteps[userId].sellSlippage = currentWalletObj.sellSlippage; // default 20
+    } else {
+      userSteps[userId].seedPhrase = null; // or keep previous, your choice
+      userSteps[userId].buySlippage = 0.01;
+      userSteps[userId].sellSlippage = 0.01;
+    }
+    // console.log('selectedWallets before formatting:', selectedWallets);
+    if (!tokenAddress || !tokenAddress.includes("::")) {
+      await ctx.reply("❌ Invalid token address format.");
+      return;
+    }
+    try {
+      const result = await getFallbackTokenDetails(tokenAddress, selectedWallets[0]);
+      // console.log('result', result);
+      if (!result) {
+        return ctx.reply("❌ Token not found or no liquidity.");
+      }
+
+      const { tokenInfo, source } = result;
+      // const isSuiPair = tokenInfo.data.quoteToken.symbol === "SUI";
+      // const isSuiPair = tokenInfo.decimals === "SUI";
+
+      const balances = await Promise.all(selectedWallets.map(async (wallet) => {
+        const tokenBalance = await getCoinBalance(wallet, tokenInfo.address);
+        const suiBalance = await getBalance(wallet);
+        return { wallet, suiBalance, tokenBalance };
+      }));
+
+      // const quoteSymbol = tokenInfo?.symbol;
+      const tokenName = tokenInfo.name;
+      const tokenSymbol = tokenInfo.symbol;
+      const token_address = tokenInfo.address;
+      let formattedMessage = `CENTRON BOT⚡\n\n`;
+      formattedMessage += `📉${tokenName} (${tokenSymbol}/SUI)\n\n`;
+      formattedMessage += `🪙 CA: <code>${token_address}</code>\n`;
+      formattedMessage += `💵 Price (USD): $${tokenInfo.price}\n`;
+      formattedMessage += `🏦 Market Cap: ${formatPrice(Number(tokenInfo.marketCap))}\n`;
+      formattedMessage += `🧬 Coin Type: ${tokenInfo.coinType || "N/A"}\n`;
+      formattedMessage += `📅 Created: ${new Date(tokenInfo.date).toLocaleString()}\n\n`;
+      formattedMessage += `Selected Wallets:\n`;
+      balances.forEach(({ wallet, suiBalance, tokenBalance }) => {
+        formattedMessage += ` 💳 ${shortAddress(wallet)} | ${suiBalance} SUI | ${tokenBalance.balance} ${tokenSymbol} | $${tokenBalance.balanceUsd} \n`;
+      });
+      // let tokenBalance = { balance: 0, balanceUsd: 0 };
+      // let suiBalance = 0;
+
+      if (!userSteps[userId]) userSteps[userId] = {};
+      userSteps[userId].tokenInfo = tokenInfo;
+      userSteps[userId].tokenAddress = tokenAddress;
+      userSteps[userId].wallets = wallets.map(w => w.address);
+      console.log("what is happening", userSteps[userId])
+
+      // Also save phrase here if you want
+      // const currentWalletObj = wallets.find(w => (w.address || w.walletAddress).toLowerCase() === (userSteps[userId]?.currentWallet || '').toLowerCase());
+      // userSteps[userId].seedPhrase = currentWalletObj?.seedPhrase || currentWalletObj?.phrase || null;
+
+      const keyboard = {
+        inline_keyboard: buildFullKeyboard(selectedWallets, wallets.map(w => w.address), false, mode)
+      };
+
+      if (userSteps[userId]?.mainMessageId) {
+        // Try editing the existing main message
+        try {
+          await ctx.telegram.editMessageText(
+            ctx.chat.id,
+            userSteps[userId].mainMessageId,
+            undefined,
+            formattedMessage,
+            {
+              parse_mode: "HTML",
+              reply_markup: keyboard
+            }
+          );
+        } catch (err) {
+          console.warn("editMessageText failed, sending new message instead");
+          const sent = await ctx.reply(formattedMessage, {
+            parse_mode: "HTML",
+            reply_markup: keyboard
+          });
+          userSteps[userId].mainMessageId = sent.message_id;
+        }
+      } else {
+        // First time showing main message
+        const sent = await ctx.reply(formattedMessage, {
+          parse_mode: "HTML",
+          reply_markup: keyboard
+        });
+        userSteps[userId].mainMessageId = sent.message_id;
+      }
+
+    } catch (error) {
+      console.error(error);
+      ctx.reply("❌ Failed to fetch token info. Please make sure the address is correct.");
+    }
+  }
+
+
+  if (step.state === 'awaiting_custom_buy_amount' || step.state === 'awaiting_custom_sell_amount') {
+    const amount = parseFloat(text);
+    const suiAmount = toSmallestUnit(amount)
+    console.log("My amount", suiAmount);
+
+    if (isNaN(amount) || amount <= 0) {
+      return ctx.reply("❌ Please enter a valid number greater than 0.");
+    }
+
+    const address = step.currentWallet;
+    const user = await getUser(userId);
+    const wallets = user.wallets || [];
+
+    // Find the actual wallet object for the current wallet
+    const currentWallet = wallets.find(
+      w => (w.address || w.walletAddress)?.toLowerCase() === address?.toLowerCase()
+    );
+
+    const userPhrase = currentWallet?.seedPhrase || null;
+    const tokenAddress = step.tokenAddress;
+    const buySlippage = step.buySlippage;
+    const sellSlippage = step.sellSlippage;
+
+    console.log('heyyyy', address, userPhrase, tokenAddress);
+    // const phrase = user?.seedPhrase;
+    // const address = user?.walletAddress || step.currentWallet;
+    if (!userPhrase || !address || !tokenAddress) {
+      return ctx.reply("❌ Missing wallet or token info.");
+    }
+
+    await ctx.reply(`⏳ ${step.state.includes('buy') ? 'Buying' : 'Selling'} ${amount} SUI...`);
+    try {
+      const success = step.state.includes('buy')
+        ? await buyTokenWithAftermath({
+          tokenAddress,
+          phrase: userPhrase,
+          suiAmount,
+          slippage: buySlippage
+        })
+        : await sellTokenWithAftermath({
+          tokenAddress,
+          phrase: userPhrase,
+          suiAmount,
+          slippage: sellSlippage
+        });
+
+      if (success) {
+        await ctx.reply(`✅ Successfully ${step.state.includes('buy') ? 'bought' : 'sold'} ${amount} SUI.`);
+      } else {
+        await ctx.reply(`❌ Failed to ${step.state.includes('buy') ? 'buy' : 'sell'} token.`);
+      }
+      delete userSteps[userId].state;
+    } catch (error) {
+      console.error('Buy/Sell error:', error);
+      await ctx.reply(`❌ Error occurred: ${error.message || error}`);
+    }
+
+    // Reset user state
+    delete userSteps[userId];
+  }
+
+  if (
+    !step?.awaitingSlippageInput
+    && step?.state
+    && step?.state !== "awaiting_buy_token_address"
+    && step?.state !== "awaiting_sell_token_address"
+    && !(ctx.message?.reply_to_message?.text?.includes("mnemonic") || ctx.message?.reply_to_message?.text?.includes("privatekey"))
+    && !(replyTo && replyTo.includes("How many wallets would you like to generate"))
+    && step?.state !== 'awaiting_custom_buy_amount'
+    && step?.state !== 'awaiting_custom_sell_amount'
+  ) {
+    await handleAction(ctx, text, userId);
+  }
+
 });
+
 
 bot.on("callback_query", async (ctx) => {
   const data = ctx.callbackQuery.data;
   const userId = ctx.from.id;
+  await ctx.answerCbQuery(); // <-- important
   handleAction(ctx, data, userId);
 });
 
@@ -435,4 +802,3 @@ console.log("Bot is running!");
 
 
 export default { bot, webhookCallback: bot.webhookCallback('/'), };
-

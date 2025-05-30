@@ -14,7 +14,6 @@ admin.initializeApp({
 
 const db = admin.firestore();
 // const bot = new Telegraf('7280147356:AAEiEsTxsJU0M2qvOyiXJEGz1lhP-K67iMA');
-// const originalBatch = db.batch;
 
 // db.batch = function () {
 //     console.warn("🔥 db.batch() was called from:");
@@ -36,9 +35,30 @@ export async function fetchUser(userId) {
     return doc.exists ? doc.data() : null;
 }
 
+//usersteps
+// export async function saveUserStep(userId, stepData) {
+//   const userRef = db.collection('users').doc(userId.toString());
+//   await userRef.set({ step: stepData }, { merge: true });
+// }
+
+//fetch user steps
+// export async function fetchUserStep(userId) {
+//   const userRef = db.collection('users').doc(userId.toString());
+//   const doc = await userRef.get();
+//   if (!doc.exists) return null;
+//   const userData = doc.data();
+//   return userData.step || null;
+// }
+
+//update steps
+// export async function updateUserStep(userId, newStepData) {
+//   const userRef = db.collection('users').doc(userId.toString());
+//   await userRef.update({ step: newStepData });
+// }
+
 // // Get user from Firestore
-export async function getUser(userId) {
-    const user = await fetchUser(userId);
+export async function getUser(userId, referrerCode) {
+    let user = await fetchUser(userId);
     if (!user) {
         const referral = referrerCode ? referrerCode.replace('ref_', '') : null;
         await saveUser(userId, {
@@ -54,6 +74,7 @@ export async function getUser(userId) {
 
         user = await fetchUser(userId); // refetch after saving
     }
+    // const step = user?.step || {};
     return user;
 }
 
@@ -75,7 +96,6 @@ export async function incrementReferrer(referrerCode) {
         console.error(`Error incrementing referrals for ${referrerId}:`, e);
     }
 }
-
 
 export async function addWalletToUser(userId, wallet) {
     const db = admin.firestore();
@@ -110,20 +130,34 @@ export async function addWalletToUser(userId, wallet) {
         cleanWallet.walletAddress = cleanWallet.address;
     }
 
+    if (!cleanWallet.walletAddress) {
+        throw new Error("❌ Wallet is missing a walletAddress.");
+    }
+
+    if (!cleanWallet.seedPhrase && !cleanWallet.privateKey) {
+        throw new Error("❌ Wallet must have either a seed phrase or a private key.");
+    }
+
     try {
+        const userDocRef = db.collection("users").doc(userId);
+        const userDoc = await userDocRef.get();
+
+        if (userDoc.exists) {
+            const userData = userDoc.data();
+            const wallets = userData?.wallets || [];
+
+            // ✅ Check if wallet already exists
+            const exists = wallets.some(w => w.walletAddress === cleanWallet.walletAddress);
+            if (exists) {
+                throw new Error("❌ This wallet is already imported.");
+            }
+        }
+
         const dataToSave = {
             wallets: admin.firestore.FieldValue.arrayUnion(cleanWallet),
             walletAddress: cleanWallet.walletAddress // optional main walletAddress field
         };
-
-        // if (cleanWallet.walletAddress !== undefined) {
-        //     dataToSave.walletAddress = cleanWallet.walletAddress;
-        // }
-        await db.collection("users").doc(userId).set(dataToSave
-            // walletAddress: cleanWallet.walletAddress,
-            // wallets: admin.firestore.FieldValue.arrayUnion(cleanWallet)
-            , { merge: true });
-
+        await userDocRef.set(dataToSave, { merge: true });
         console.log("✅ Wallet saved to Firestore");
     } catch (error) {
         console.error("❌ Error saving wallet to Firestore:", error.message || error);
@@ -316,7 +350,6 @@ export async function updateUser(userId, updatedUserData) {
     const userRef = db.collection('users').doc(userId.toString());
     await userRef.set(updatedUserData, { merge: true });
 }
-
 
 
 export async function getReferralStats(userId) {

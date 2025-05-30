@@ -15,17 +15,6 @@ export async function handleBuySlippage(ctx, userId) {
     // buttons.push([{ text: `✅ All Wallets | ${wallets[0].buySlippage || "1.0"}%`, callback_data: `set_buy_slippage_all` }]);
     buttons.push([{ text: `✅ All Wallets | ${user.buySlippage || "1.0"}%`, callback_data: `set_buy_slippage_all` }]);
 
-    // Individual wallets
-    // for (const wallet of wallets) {
-    //     // console.log(wallet);
-    //     if (!wallet.walletAddress) continue;
-    //     const short = `${wallet.walletAddress.slice(0, 4)}...${wallet.walletAddress.slice(-4)}`;
-    //     buttons.push([{
-    //         text: `${short} | ${wallet.buySlippage || "1.0"}%`,
-    //         callback_data: `set_buy_slippage_${wallet.walletAddress.slice(0, 10)}`
-    //     }]);
-    // }
-
     wallets.forEach((wallet, index) => {
         if (!wallet.walletAddress) return;
         const short = `${wallet.walletAddress.slice(0, 4)}...${wallet.walletAddress.slice(-4)}`;
