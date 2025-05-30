@@ -1,85 +1,66 @@
-import { AggregatorClient, Env } from "@cetusprotocol/aggregator-sdk";
-import { SuiClient } from "@mysten/sui.js/client";
+import { AggregatorClient } from "@cetusprotocol/aggregator-sdk"
 import { TransactionBlock } from "@mysten/sui.js/transactions";
-import { Ed25519Keypair } from "@mysten/sui.js/keypairs";
-import { BN } from "bn.js";
-import dotenv from "dotenv";
+// import { Transaction } from '@mysten/sui/transactions';
+import BN from "bn.js"
 
-dotenv.config();
+// const client = new AggregatorClient({})
 
-const SUI_RPC = "https://fullnode.mainnet.sui.io";
-const OVERLAY_FEE_RECEIVER = process.env.OVERLAY_FEE_RECEIVER || process.env.WALLET_ADDRESS;
 
-// Initialize Sui Client
-const suiClient = new SuiClient({ url: SUI_RPC });
-
-function getKeypairFromPhrase(phrase) {
-  return Ed25519Keypair.deriveKeypair(phrase);
-}
-
-export const buyTokenCetusWithOutput = async (tokenOut, walletAddress, amountIn, phrase) => {
+export const buyTokenCetusWithOutput = async (userId, client, tokenAddress, walletAddress, suiAmount, phrase, slippage = 0.01) => {
   try {
-    const tokenIn = "0x2::sui::SUI";
-    const amountInAtomic = new BN(amountIn * 1e9);
-    const keypair = getKeypairFromPhrase(phrase);
 
-    const aggregator = new AggregatorClient({
-      client: suiClient,
-      signer: walletAddress,
-      env: Env.Mainnet,
-      overlayFeeRate: 0.01,
-      overlayFeeReceiver: OVERLAY_FEE_RECEIVER,
-    });
+    const amount = new BN(suiAmount * 1e9)
+    const from = "0x2::sui::SUI"
+    // const target = "0x06864a6f921804860930db6ddbe2e16acdf8504495ea7481637a1c8b9a8fe54b::cetus::CETUS"
+    const target = tokenAddress
 
-    // 🔍 Get swap route
-    const routers = await aggregator.findRouters({
-      from: tokenIn,
-      target: tokenOut,
-      amount: amountInAtomic,
-      byAmountIn: true,
-    });
+    const routers = await client.findRouters({
+      from,
+      target,
+      amount,
+      byAmountIn: true, // `true` means fix input amount, `false` means fix output amount
+    })
+    console.log('routers', routers);
 
     if (!routers || routers.length === 0) {
-      console.error("❌ No route found");
-      return { success: false, error: "No route found" };
+      console.log("❌ No swap route found.");
+      return false;
     }
 
     const txb = new TransactionBlock();
 
-    // 🪙 Split input coin (for fixed amount swap)
-    const [inputCoin] = txb.splitCoins(txb.gas, [txb.pure(amountInAtomic.toString())]);
+    const [inputCoin] = txb.splitCoins(txb.gas, [txb.pure(amount.toString())]);
+    console.log("The input coins are: ", inputCoin,)
 
-    // 🛠️ Use routerSwap to get output coin
-    const targetCoin = await aggregator.routerSwap({
-      routers: routers,
-      byAmountIn: true,
+    const targetCoin = await client.routerSwap({
+      routers,
       txb,
       inputCoin,
-      slippage: 0.01,
-    });
+      slippage,
+    })
+    console.log('target coins:', targetCoin);
 
-    // ✉️ You can optionally transfer the output coin
-    // txb.transferObjects([targetCoin], txb.pure(walletAddress));
+    // const userAddress = signer.toSuiAddress();
+    const userAddress = walletAddress;
+    client.transferOrDestoryCoin(txb, targetCoin, userAddress);
 
-    // Or destroy the coin if you want
-    // aggregator.transferOrDestoryCoin(txb, targetCoin, tokenOut);
+    // you can use this target coin object argument to build your ptb.
+    // client.transferOrDestoryCoin(
+    // txb,
+    // targetCoin,
+    // target
+    // )
 
-    const response = await suiClient.signAndExecuteTransactionBlock({
-      signer: keypair,
+    // 5. Sign and send
+    const result = await signer.signAndExecuteTransactionBlock({
       transactionBlock: txb,
-      options: {
-        showEffects: true,
-        showObjectChanges: true,
-        showBalanceChanges: true,
-      },
+      options: { showEffects: true },
     });
 
-    return {
-      success: true,
-      digest: response.digest,
-      balanceChanges: response.balanceChanges,
-      objectChanges: response.objectChanges,
-    };
+
+    console.log("✅ Token purchased successfully:", result.digest);
+    return true;
+
   } catch (err) {
     console.error("❌ Error in buyTokenCetusWithOutput:", err);
     return { success: false, error: err.message || err };

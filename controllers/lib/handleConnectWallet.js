@@ -5,7 +5,6 @@ export async function handleConnectWallet(ctx, userId) {
         parse_mode: "Markdown",
         reply_markup: {
             force_reply: true
-            // inline_keyboard: [[{ text: "← Back", callback_data: "wallets" }]],
         },
     });
     await saveUser(userId, { awaitingWallet: true });
