@@ -6,6 +6,54 @@ const client = new SuiClient({
     url: getFullnodeUrl('mainnet'),
 });
 
+async function fetchWithRetry(client, tokenAddress, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+    //   const metadata = await client.getCoinMetadata({ coinType: tokenAddress });
+      const metadata = await client.getCoinMetadata({ coinType });
+      return metadata;
+    } catch (e) {
+      console.warn(`Metadata fetch failed (attempt ${i + 1}):`, e.message);
+      console.warn(`Metadata fetch failed (attempt ${i + 1}):`, e.message);
+      if (i === retries - 1) throw e;
+      await new Promise(r => setTimeout(r, 1000)); // wait 1s before retry
+    }
+  }
+}
+
+
+export async function getTokensInWallet(walletAddress) {
+  const tokens = [];
+
+  const coinTypes = await client.getAllBalances({ owner: walletAddress });
+//   console.log('Coin types', coinTypes);
+
+  for (const coin of coinTypes) {
+    const { coinType, totalBalance } = coin;
+    // console.log('coinssss', coinType);
+    // console.log('coinssss-------', coin);
+
+    if (BigInt(totalBalance) === 0n) continue;
+
+    try {
+      const metadata = await client.getCoinMetadata({ coinType: coin.coinType });
+    //   const metadata = await await fetchWithRetry(client, tokenAddress);;
+    //   console.log('Metadata', metadata);
+
+      tokens.push({
+        tokenAddress: coinType,
+        symbol: metadata?.symbol || "???",
+        decimals: metadata?.decimals || 0,
+        balance: totalBalance,
+      });
+    } catch (err) {
+      console.error("❌ Error fetching token metadata for", coinType, err);
+    }
+  }
+
+  return tokens;
+}
+
 export function formatPrice(price) {
     if (price >= 1_000_000_000) {
         return `$${(price / 1_000_000_000).toFixed(1)}B`;
