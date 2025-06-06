@@ -3,8 +3,6 @@ import axios from 'axios';
 import { Telegraf } from "telegraf";
 import fs from 'fs'
 
-// const file = await readFile('./serviceAccountKey.json', 'utf-8');
-// const serviceAccount = JSON.parse(file);
 // // Initialize Firebase (replace with your service account key)
 import serviceAccount from '../../serviceAccountKey.json' assert { type: 'json' };
 
@@ -13,7 +11,6 @@ admin.initializeApp({
 });
 
 const db = admin.firestore();
-// const bot = new Telegraf('7280147356:AAEiEsTxsJU0M2qvOyiXJEGz1lhP-K67iMA');
 
 // db.batch = function () {
 //     console.warn("🔥 db.batch() was called from:");
@@ -34,27 +31,6 @@ export async function fetchUser(userId) {
 
     return doc.exists ? doc.data() : null;
 }
-
-//usersteps
-// export async function saveUserStep(userId, stepData) {
-//   const userRef = db.collection('users').doc(userId.toString());
-//   await userRef.set({ step: stepData }, { merge: true });
-// }
-
-//fetch user steps
-// export async function fetchUserStep(userId) {
-//   const userRef = db.collection('users').doc(userId.toString());
-//   const doc = await userRef.get();
-//   if (!doc.exists) return null;
-//   const userData = doc.data();
-//   return userData.step || null;
-// }
-
-//update steps
-// export async function updateUserStep(userId, newStepData) {
-//   const userRef = db.collection('users').doc(userId.toString());
-//   await userRef.update({ step: newStepData });
-// }
 
 // // Get user from Firestore
 export async function getUser(userId, referrerCode) {
@@ -77,6 +53,33 @@ export async function getUser(userId, referrerCode) {
     // const step = user?.step || {};
     return user;
 }
+
+//usersteps
+export async function saveUserStep(userId, stepData) {
+    const userRef = db.collection('users').doc(userId.toString());
+    await userRef.set({ step: stepData }, { merge: true });
+}
+
+//fetch user steps
+export async function fetchUserStep(userId) {
+    const userRef = db.collection('users').doc(userId.toString());
+    const doc = await userRef.get();
+    if (!doc.exists) return null;
+    const userData = doc.data();
+    return userData.step || null;
+}
+
+//update steps
+export async function updateUserStep(userId, newStepData) {
+    const userRef = db.collection('users').doc(userId.toString());
+    await userRef.update({ step: newStepData });
+}
+
+export async function getUserWallets(userId) {
+    const user = await fetchUser(userId);
+    return user?.wallets || [];
+}
+
 
 export async function incrementReferrer(referrerCode) {
     if (!referrerCode) return;
@@ -234,23 +237,6 @@ export async function setBuySlippage(userId, slippage, target) {
     await updateBuySlippage(userId, user); // update DB
 }
 
-
-export async function setSellSlippage(userId, slippage, target) {
-    const user = await fetchUser(userId);
-    if (!user || !user.wallets) return;
-
-    if (target === "all") {
-        // Update all
-        user.sellAllSlippage = slippage;
-        user.wallets = user.wallets.map(w => ({ ...w, sellSlippage: slippage }));
-    } else if (typeof target === "number" && user.wallets[target]) {
-        user.wallets[target].sellSlippage = slippage;
-    }
-
-    await updateSellSlippage(userId, user); // update DB
-}
-
-
 export async function updateBuySlippage(userId, target, slippage) {
     const db = admin.firestore();
     const userRef = db.collection('users').doc(userId);
@@ -287,6 +273,22 @@ export async function updateBuySlippage(userId, target, slippage) {
         throw new Error(`Invalid target: ${target}`);
     }
 }
+
+export async function setSellSlippage(userId, slippage, target) {
+    const user = await fetchUser(userId);
+    if (!user || !user.wallets) return;
+
+    if (target === "all") {
+        // Update all
+        user.sellAllSlippage = slippage;
+        user.wallets = user.wallets.map(w => ({ ...w, sellSlippage: slippage }));
+    } else if (typeof target === "number" && user.wallets[target]) {
+        user.wallets[target].sellSlippage = slippage;
+    }
+
+    await updateSellSlippage(userId, user); // update DB
+}
+
 
 export async function updateSellSlippage(userId, target, slippage) {
     const db = admin.firestore();
@@ -361,3 +363,167 @@ export async function getReferralStats(userId) {
 
     return `🔗 Your reflink: ${link}\n👥 Referrals: ${count}`;
 }
+
+export async function saveOrUpdatePosition(userId, tokenInfo) {
+    const userRef = db.collection('users').doc(userId.toString());
+    const userDoc = await userRef.get();
+
+    const {
+        tokenAddress,
+        symbol,
+        amountBought,
+        amountInSUI
+    } = tokenInfo;
+
+    const newTx = {
+        amount: amountBought,
+        price: amountInSUI / amountBought,
+        time: Date.now()
+    };
+
+    if (userDoc.exists) {
+        const userData = userDoc.data();
+        const positions = userData.positions || [];
+
+        const index = positions.findIndex(p => p.tokenAddress === tokenAddress);
+        if (index !== -1) {
+            const existing = positions[index];
+            const updated = {
+                ...existing,
+                totalAmount: existing.totalAmount + amountBought,
+                totalCostSUI: existing.totalCostSUI + amountInSUI,
+                avgPriceSUI: (existing.totalCostSUI + amountInSUI) / (existing.totalAmount + amountBought),
+                lastUpdated: Date.now(),
+                txHistory: [...(existing.txHistory || []), newTx]
+            };
+            positions[index] = updated;
+        } else {
+            positions.push({
+                tokenAddress,
+                symbol,
+                totalAmount: amountBought,
+                totalCostSUI: amountInSUI,
+                avgPriceSUI: newTx.price,
+                lastUpdated: Date.now(),
+                txHistory: [newTx]
+            });
+        }
+
+        await userRef.update({ positions });
+    } else {
+        await userRef.set({
+            positions: [{
+                tokenAddress,
+                symbol,
+                totalAmount: amountBought,
+                totalCostSUI: amountInSUI,
+                avgPriceSUI: newTx.price,
+                lastUpdated: Date.now(),
+                txHistory: [newTx]
+            }]
+        });
+    }
+}
+
+export async function getUserPositions(userId) {
+    const userRef = db.collection('users').doc(userId.toString());
+    const userDoc = await userRef.get();
+    if (!userDoc.exists) return [];
+    const data = userDoc.data();
+    return data.positions || [];
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// async function showUserDoc(userId) {
+//     const userDocRef = db.collection("users").doc(String(userId));
+//     const doc = await userDocRef.get();
+
+//     if (!doc.exists) {
+//         console.log("❌ User not found");
+//     } else {
+//         console.log("✅ User data:", doc.data());
+//     }
+// }
+// showUserDoc("1122336347");
+// showUserDoc("5439602958");
+
+// async function listAllUsers() {
+//     const snapshot = await db.collection("users").get();
+//     if (snapshot.empty) {
+//         console.log("⚠️ No users in the database.");
+//         return;
+//     }
+
+//     console.log("✅ Found user IDs:");
+//     snapshot.forEach(doc => {
+//         console.log("•", doc.id);
+//     });
+// }
+
+// listAllUsers();
+
+// Example usage:
+
+// Recursively delete a document, including its subcollections
+// async function deleteDocument(docRef) {
+//   // Delete subcollections first
+//   const subcollections = await docRef.listCollections();
+//   for (const subCol of subcollections) {
+//     await deleteCollection(subCol);
+//   }
+
+//   // Delete the document itself
+//   await docRef.delete();
+// }
+
+// // Recursively delete all documents in a collection
+// async function deleteCollection(collectionRef, batchSize = 100) {
+//   const query = collectionRef.limit(batchSize);
+//   const snapshot = await query.get();
+
+//   if (snapshot.size === 0) {
+//     return;
+//   }
+
+//   // Batch delete all docs in this snapshot
+//   const batch = db.batch();
+//   for (const doc of snapshot.docs) {
+//     batch.delete(doc.ref);
+//   }
+//   await batch.commit();
+
+//   // For each doc, delete subcollections recursively
+//   for (const doc of snapshot.docs) {
+//     await deleteDocument(doc.ref);
+//   }
+
+//   // Recurse to next batch
+//   await deleteCollection(collectionRef, batchSize);
+// }
+
+// async function clearFirestore() {
+//   const collections = await db.listCollections();
+//   console.log(`Found ${collections.length} collections`);
+
+//   for (const collection of collections) {
+//     console.log(`Deleting collection: ${collection.id}`);
+//     await deleteCollection(collection);
+//   }
+
+//   console.log('Firestore database cleared!');
+// }
+
+// clearFirestore().catch(console.error);
